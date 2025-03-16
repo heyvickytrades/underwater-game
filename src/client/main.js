@@ -44,7 +44,8 @@ function initializeGame() {
         // Create camera
         const aspectRatio = window.innerWidth / window.innerHeight;
         camera = new THREE.PerspectiveCamera(75, aspectRatio, 0.1, 1000);
-        camera.position.set(0, 5, 10); // Position slightly above and behind origin
+        // Position the camera to see the player clearly - higher and further back
+        camera.position.set(0, 10, 15);
         camera.lookAt(0, 0, 0);
 
         // Create renderer
@@ -87,6 +88,15 @@ function initializeGame() {
         const gridHelper = new THREE.GridHelper(50, 50, 0x0088ff, 0x0044aa);
         gridHelper.position.y = -5;
         scene.add(gridHelper);
+        
+        // Add some ambient objects to make the scene more visible
+        const seaFloor = new THREE.Mesh(
+            new THREE.PlaneGeometry(100, 100),
+            new THREE.MeshStandardMaterial({ color: 0x004466 })
+        );
+        seaFloor.rotation.x = -Math.PI / 2;
+        seaFloor.position.y = -5.1;
+        scene.add(seaFloor);
 
         // Set up keyboard controls for movement
         setupKeyboardControls();
@@ -102,6 +112,22 @@ function initializeGame() {
         if (loadingScreen) {
             loadingScreen.style.display = 'none';
         }
+
+        // Add debug position display
+        const debugInfo = document.createElement('div');
+        debugInfo.id = 'debugInfo';
+        debugInfo.style.position = 'absolute';
+        debugInfo.style.top = '10px';
+        debugInfo.style.left = '10px';
+        debugInfo.style.padding = '5px 10px';
+        debugInfo.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        debugInfo.style.color = 'white';
+        debugInfo.style.fontFamily = 'Arial, sans-serif';
+        debugInfo.style.fontSize = '12px';
+        debugInfo.style.borderRadius = '3px';
+        debugInfo.style.zIndex = '1000';
+        debugInfo.textContent = 'Position: 0, 0, 0';
+        document.body.appendChild(debugInfo);
 
         // Start animation loop
         animate(0);
@@ -127,50 +153,83 @@ function onWindowResize() {
 
 // Animation loop
 function animate(time) {
-    requestAnimationFrame(animate);
-    
-    // Calculate time delta for physics
-    const deltaTime = (time - lastTime) / 1000;
-    lastTime = time;
-    
-    // Update physics world
-    physicsWorld.step(fixedTimeStep, deltaTime, 3);
-    
-    // Update player mesh position from physics body
-    player.position.copy(playerBody.position);
-    player.quaternion.copy(playerBody.quaternion);
-    
-    // Check if player has moved to a new chunk
-    const playerChunkX = Math.floor(player.position.x / CHUNK_SIZE);
-    const playerChunkZ = Math.floor(player.position.z / CHUNK_SIZE);
-    
-    if (playerChunkX !== currentPlayerChunk.x || playerChunkZ !== currentPlayerChunk.z) {
-        currentPlayerChunk.x = playerChunkX;
-        currentPlayerChunk.z = playerChunkZ;
-        updateChunks();
+    try {
+        requestAnimationFrame(animate);
+        
+        // Skip animation if player or scene isn't initialized yet
+        if (!player || !scene || !camera || !renderer) {
+            console.warn("Animation loop running but game objects not initialized yet");
+            return;
+        }
+        
+        // Calculate time delta for physics
+        const deltaTime = (time - lastTime) / 1000;
+        lastTime = time;
+        
+        // Update physics world
+        physicsWorld.step(fixedTimeStep, deltaTime, 3);
+        
+        // Update player mesh position from physics body
+        player.position.copy(playerBody.position);
+        player.quaternion.copy(playerBody.quaternion);
+        
+        // Log player position occasionally (every 100 frames)
+        if (Math.floor(time / 1000) % 5 === 0 && Math.floor(time * 10) % 10 === 0) {
+            console.log(`Player position: x=${player.position.x.toFixed(2)}, y=${player.position.y.toFixed(2)}, z=${player.position.z.toFixed(2)}`);
+            console.log(`Camera position: x=${camera.position.x.toFixed(2)}, y=${camera.position.y.toFixed(2)}, z=${camera.position.z.toFixed(2)}`);
+        }
+        
+        // Update debug position display
+        const debugInfo = document.getElementById('debugInfo');
+        if (debugInfo) {
+            debugInfo.textContent = `Position: x=${player.position.x.toFixed(2)}, y=${player.position.y.toFixed(2)}, z=${player.position.z.toFixed(2)}`;
+        }
+        
+        // Check if player has moved to a new chunk
+        const playerChunkX = Math.floor(player.position.x / CHUNK_SIZE);
+        const playerChunkZ = Math.floor(player.position.z / CHUNK_SIZE);
+        
+        if (playerChunkX !== currentPlayerChunk.x || playerChunkZ !== currentPlayerChunk.z) {
+            currentPlayerChunk.x = playerChunkX;
+            currentPlayerChunk.z = playerChunkZ;
+            updateChunks();
+        }
+        
+        // Send position update to server (throttled to every 10 frames to reduce network traffic)
+        if (time % 10 < 1 && socket && socket.readyState === WebSocket.OPEN) {
+            sendPositionUpdate();
+        }
+        
+        // Render scene
+        renderer.render(scene, camera);
+    } catch (error) {
+        console.error("Error in animation loop:", error);
     }
-    
-    // Send position update to server (throttled to every 10 frames to reduce network traffic)
-    if (time % 10 < 1 && socket && socket.readyState === WebSocket.OPEN) {
-        sendPositionUpdate();
-    }
-    
-    // Render scene
-    renderer.render(scene, camera);
 }
 
 // Send player position update to server
 function sendPositionUpdate() {
-    const positionMessage = {
-        type: 'movement',
-        position: {
-            x: player.position.x,
-            y: player.position.y,
-            z: player.position.z
-        }
-    };
+    // Only send if we have a valid socket connection and player exists
+    if (socket && socket.readyState === WebSocket.OPEN && player) {
+        const positionMessage = {
+            type: 'movement',
+            position: {
+                x: player.position.x,
+                y: player.position.y,
+                z: player.position.z
+            },
+            velocity: {
+                x: playerBody.velocity.x,
+                y: playerBody.velocity.y,
+                z: playerBody.velocity.z
+            }
+        };
+        
+        socket.send(JSON.stringify(positionMessage));
+    }
     
-    socket.send(JSON.stringify(positionMessage));
+    // Schedule the next update
+    setTimeout(sendPositionUpdate, 50); // Send position updates 20 times per second
 }
 
 // Connect to WebSocket server
@@ -189,8 +248,14 @@ function connectToServer() {
     socket.addEventListener('open', (event) => {
         console.log('Connected to WebSocket server');
         
+        // Start sending position updates
+        sendPositionUpdate();
+        
         // Send a test message to the server
-        sendMessage('Hello from client!');
+        sendMessage({
+            type: 'message',
+            content: 'Hello from client!'
+        });
     });
     
     // Listen for messages
@@ -203,6 +268,9 @@ function connectToServer() {
             if (message.type === 'welcome') {
                 clientId = message.id;
                 console.log(`Assigned client ID: ${clientId}`);
+                
+                // Just hide the loading screen, game is already initialized in socket.open handler
+                document.getElementById('loadingScreen').style.display = 'none';
             }
             
             // Handle game state updates
@@ -214,6 +282,10 @@ function connectToServer() {
             // Handle chunk updates from server
             if (message.type === 'chunkUpdate') {
                 console.log(`Server confirmed chunk update to: ${message.chunkX}, ${message.chunkZ}`);
+                // Update local chunk data if needed
+                currentPlayerChunk.x = message.chunkX;
+                currentPlayerChunk.z = message.chunkZ;
+                updateChunks();
             }
         } catch (error) {
             console.error('Error parsing message:', error);
@@ -264,20 +336,35 @@ function setupKeyboardControls() {
     // Track key presses
     window.addEventListener('keydown', (event) => {
         if (keys.hasOwnProperty(event.key)) {
-            keys[event.key] = true;
+            if (!keys[event.key]) { // Only send message if state changes
+                keys[event.key] = true;
+                // Send key press event to server
+                sendMessage({
+                    type: 'keyPress',
+                    key: event.key,
+                    pressed: true
+                });
+            }
         }
     });
     
     window.addEventListener('keyup', (event) => {
         if (keys.hasOwnProperty(event.key)) {
             keys[event.key] = false;
+            // Send key release event to server
+            sendMessage({
+                type: 'keyPress',
+                key: event.key,
+                pressed: false
+            });
         }
     });
     
     // Apply forces based on key presses
     function updateMovement() {
-        // Reset velocity first
-        playerBody.velocity.set(0, 0, 0);
+        // Reset velocity first for better control
+        playerBody.velocity.x = 0;
+        playerBody.velocity.z = 0;
         
         // Forward/backward movement
         if (keys.ArrowUp) {
@@ -292,6 +379,9 @@ function setupKeyboardControls() {
         } else if (keys.ArrowRight) {
             playerBody.velocity.x = moveSpeed;
         }
+        
+        // Apply damping for smooth underwater movement
+        playerBody.linearDamping = 0.9;
         
         requestAnimationFrame(updateMovement);
     }
@@ -421,26 +511,46 @@ function updatePlayerPositions(players) {
     
     // Loop through all players from server data
     for (const [playerId, position] of Object.entries(players)) {
-        // Skip our own player
-        if (playerId == clientId) continue;
+        // Convert playerId to number for correct comparison
+        const pid = Number(playerId);
+        
+        // Skip our own player - server's position is authoritative, but we use client-side prediction
+        if (pid === clientId) {
+            // If server position is very different from our position, we might need to sync
+            const serverPos = new THREE.Vector3(position.x, position.y, position.z);
+            const localPos = new THREE.Vector3(player.position.x, player.position.y, player.position.z);
+            
+            // If server and client positions differ by more than 5 units, sync with server
+            if (serverPos.distanceTo(localPos) > 5) {
+                console.log("Server correction: large position difference detected");
+                player.position.copy(serverPos);
+                playerBody.position.copy(new CANNON.Vec3(position.x, position.y, position.z));
+            }
+            
+            continue;
+        }
         
         // If we don't have a mesh for this player yet, create one
-        if (!otherPlayers.has(playerId)) {
+        if (!otherPlayers.has(pid)) {
+            console.log(`Creating new player representation for player ${pid}`);
             const playerGeometry = new THREE.BoxGeometry(1, 1, 1);
             const playerMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 }); // Same green color
             const playerMesh = new THREE.Mesh(playerGeometry, playerMaterial);
             scene.add(playerMesh);
-            otherPlayers.set(playerId, playerMesh);
+            otherPlayers.set(pid, playerMesh);
         }
         
         // Update the player's position
-        const playerMesh = otherPlayers.get(playerId);
-        playerMesh.position.set(position.x, position.y, position.z);
+        const playerMesh = otherPlayers.get(pid);
+        if (playerMesh) {
+            playerMesh.position.set(position.x, position.y, position.z);
+        }
     }
     
     // Remove players that are no longer in the game
     for (const [playerId, playerMesh] of otherPlayers.entries()) {
         if (!players[playerId]) {
+            console.log(`Removing player ${playerId} who left the game`);
             scene.remove(playerMesh);
             otherPlayers.delete(playerId);
         }
@@ -496,14 +606,24 @@ function setupGame() {
         statusIndicator.textContent = 'Connected';
         statusIndicator.style.backgroundColor = 'rgba(0, 128, 0, 0.5)';
         
-        // Initialize the game once connected
-        document.getElementById('startButton').style.display = 'block';
-        document.getElementById('startButton').addEventListener('click', () => {
-            if (initializeGame()) {
-                // If game initialized successfully, hide the button
-                document.getElementById('startButton').style.display = 'none';
+        // Auto-initialize game without waiting for button click
+        if (initializeGame()) {
+            console.log("Game initialized successfully");
+            // Hide the start button as we're auto-starting
+            const startButton = document.getElementById('startButton');
+            if (startButton) {
+                startButton.style.display = 'none';
             }
-        });
+        } else {
+            console.error("Game initialization failed");
+            document.getElementById('startButton').style.display = 'block';
+            document.getElementById('startButton').addEventListener('click', () => {
+                if (initializeGame()) {
+                    // If game initialized successfully, hide the button
+                    document.getElementById('startButton').style.display = 'none';
+                }
+            });
+        }
     });
     
     socket.addEventListener('close', () => {
@@ -528,7 +648,10 @@ function setupGame() {
     testButton.style.zIndex = '1000';
     
     testButton.addEventListener('click', () => {
-        sendMessage('Test button clicked!');
+        sendMessage({
+            type: 'message',
+            content: 'Test button clicked!'
+        });
     });
     
     document.body.appendChild(testButton);

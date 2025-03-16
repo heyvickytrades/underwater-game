@@ -23,10 +23,13 @@ let nextClientId = 0;
 
 // Game world constants
 const CHUNK_SIZE = 16;
+const MOVE_SPEED = 10; // Should match client move speed
 
-// Track player positions and their current chunks
+// Track player positions, velocities, and their current chunks
 const playerPositions = new Map(); // Map of client ID to {x, y, z} position
+const playerVelocities = new Map(); // Map of client ID to {x, y, z} velocity
 const playerChunks = new Map(); // Map of client ID to {x, z} chunk coordinates
+const playerKeys = new Map(); // Map of client ID to key states {ArrowUp, ArrowDown, ArrowLeft, ArrowRight}
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
@@ -36,7 +39,14 @@ wss.on('connection', (ws) => {
     
     // Initialize player position at origin
     playerPositions.set(clientId, { x: 0, y: 0, z: 0 });
+    playerVelocities.set(clientId, { x: 0, y: 0, z: 0 });
     playerChunks.set(clientId, { x: 0, z: 0 });
+    playerKeys.set(clientId, { 
+        ArrowUp: false, 
+        ArrowDown: false, 
+        ArrowLeft: false, 
+        ArrowRight: false 
+    });
     
     console.log(`Client ${clientId} connected`);
 
@@ -46,13 +56,25 @@ wss.on('connection', (ws) => {
             const parsedMessage = JSON.parse(message);
             console.log(`Received from client ${clientId}:`, parsedMessage);
             
+            // Handle key press messages
+            if (parsedMessage.type === 'keyPress') {
+                const keyState = playerKeys.get(clientId);
+                if (keyState && parsedMessage.key in keyState) {
+                    keyState[parsedMessage.key] = parsedMessage.pressed;
+                    // No need to send a response, this will be reflected in the next game state update
+                }
+            }
+            
             // Handle player movement messages
-            if (parsedMessage.type === 'movement') {
-                // Update player position
-                const position = parsedMessage.position;
-                playerPositions.set(clientId, position);
+            else if (parsedMessage.type === 'movement') {
+                // Update player position and velocity
+                playerPositions.set(clientId, parsedMessage.position);
+                if (parsedMessage.velocity) {
+                    playerVelocities.set(clientId, parsedMessage.velocity);
+                }
                 
                 // Calculate chunk coordinates
+                const position = parsedMessage.position;
                 const chunkX = Math.floor(position.x / CHUNK_SIZE);
                 const chunkZ = Math.floor(position.z / CHUNK_SIZE);
                 
@@ -80,7 +102,9 @@ wss.on('connection', (ws) => {
         console.log(`Client ${clientId} disconnected`);
         clients.delete(ws);
         playerPositions.delete(clientId);
+        playerVelocities.delete(clientId);
         playerChunks.delete(clientId);
+        playerKeys.delete(clientId);
     });
     
     // Send welcome message with client ID
@@ -96,8 +120,45 @@ const gameState = {
     players: {} // Will contain player positions for broadcasting
 };
 
+// Process player movement based on key states
+function updatePlayerPositions() {
+    for (const [clientId, keyState] of playerKeys.entries()) {
+        // Get current position
+        const position = playerPositions.get(clientId);
+        if (!position) continue;
+        
+        // Get or initialize velocity
+        let velocity = playerVelocities.get(clientId) || { x: 0, y: 0, z: 0 };
+        
+        // Apply movement based on keys
+        velocity.x = 0;
+        velocity.z = 0;
+        
+        if (keyState.ArrowUp) velocity.z = -MOVE_SPEED;
+        if (keyState.ArrowDown) velocity.z = MOVE_SPEED;
+        if (keyState.ArrowLeft) velocity.x = -MOVE_SPEED;
+        if (keyState.ArrowRight) velocity.x = MOVE_SPEED;
+        
+        // Apply damping (simulate water resistance)
+        const damping = 0.9;
+        velocity.x *= damping;
+        velocity.z *= damping;
+        
+        // Update position based on velocity
+        position.x += velocity.x * 0.1; // Scale by time factor (0.1 seconds)
+        position.z += velocity.z * 0.1;
+        
+        // Update stored values
+        playerPositions.set(clientId, position);
+        playerVelocities.set(clientId, velocity);
+    }
+}
+
 // Game loop - runs every 100ms
 const gameLoop = setInterval(() => {
+    // Update player positions based on key states
+    updatePlayerPositions();
+    
     // Update game state
     gameState.timestamp = Date.now();
     
