@@ -21,6 +21,10 @@ let currentPlayerChunk = { x: 0, z: 0 }; // Current chunk the player is in
 // Other players' representations (will be created as needed)
 const otherPlayers = new Map(); // Map of clientId to player mesh
 
+// Fish entities 
+const fishEntities = new Map(); // Map of fishId to fish data and mesh
+const fishChunkGroups = new Map(); // Map of "chunkX,chunkZ" keys to THREE.Group objects for fish
+
 // Initialize ThreeJS and Cannon.js
 function initializeGame() {
     try {
@@ -195,6 +199,11 @@ function animate(time) {
             updateChunks();
         }
         
+        // Periodically check for fish that should be removed (every second based on animation time)
+        if (Math.floor(time) % 1000 < 20) {
+            cleanupOutOfRangeFish();
+        }
+        
         // Send position update to server (throttled to every 10 frames to reduce network traffic)
         if (time % 10 < 1 && socket && socket.readyState === WebSocket.OPEN) {
             sendPositionUpdate();
@@ -243,66 +252,81 @@ function connectToServer() {
     
     // Create WebSocket connection
     socket = new WebSocket(wsUrl);
-    
+
     // Connection opened
     socket.addEventListener('open', (event) => {
         console.log('Connected to WebSocket server');
+        document.getElementById('connectionStatus').textContent = 'Connected';
+        document.getElementById('connectionStatus').style.color = 'green';
         
         // Start sending position updates
         sendPositionUpdate();
-        
-        // Send a test message to the server
-        sendMessage({
-            type: 'message',
-            content: 'Hello from client!'
-        });
     });
-    
-    // Listen for messages
+
+    // Handle messages from server
     socket.addEventListener('message', (event) => {
         try {
             const message = JSON.parse(event.data);
-            console.log('Message from server:', message);
-            
-            // Handle welcome message with client ID
+            console.log('Received:', message);
+
+            // Handle welcome message
             if (message.type === 'welcome') {
                 clientId = message.id;
                 console.log(`Assigned client ID: ${clientId}`);
-                
-                // Just hide the loading screen, game is already initialized in socket.open handler
-                document.getElementById('loadingScreen').style.display = 'none';
+                document.getElementById('clientId').textContent = clientId;
             }
             
+            // Handle fish initialization
+            else if (message.type === 'fishInit') {
+                console.log('Received fish initialization data:', message.fish);
+                // Initialize all fish entities
+                for (const fishId in message.fish) {
+                    const fish = message.fish[fishId];
+                    createFishEntity(fish);
+                }
+            }
+            
+            // Handle fish spawn
+            else if (message.type === 'fishSpawn') {
+                console.log('Fish spawned:', message.fish);
+                createFishEntity(message.fish);
+            }
+
             // Handle game state updates
-            if (message.type === 'gameState') {
-                // Update player positions from server data
+            else if (message.type === 'gameState') {
+                // Update player positions based on server data
                 updatePlayerPositions(message.data.players);
+                
+                // Update fish positions based on server data
+                updateFishPositions(message.data.fish);
             }
-            
-            // Handle chunk updates from server
-            if (message.type === 'chunkUpdate') {
-                console.log(`Server confirmed chunk update to: ${message.chunkX}, ${message.chunkZ}`);
-                // Update local chunk data if needed
-                currentPlayerChunk.x = message.chunkX;
-                currentPlayerChunk.z = message.chunkZ;
+
+            // Handle chunk updates
+            else if (message.type === 'chunkUpdate') {
+                console.log(`Chunk update: (${message.chunkX}, ${message.chunkZ})`);
+                currentPlayerChunk = { x: message.chunkX, z: message.chunkZ };
                 updateChunks();
             }
         } catch (error) {
             console.error('Error parsing message:', error);
         }
     });
-    
-    // Connection closed
+
+    // Socket closed event
     socket.addEventListener('close', (event) => {
-        console.log('Disconnected from server');
+        console.log('Connection closed');
+        document.getElementById('connectionStatus').textContent = 'Disconnected';
+        document.getElementById('connectionStatus').style.color = 'red';
         
-        // Try to reconnect after a delay
-        setTimeout(connectToServer, 3000);
+        // Attempt to reconnect after 2 seconds
+        setTimeout(connectToServer, 2000);
     });
-    
-    // Connection error
+
+    // Socket error event
     socket.addEventListener('error', (error) => {
         console.error('WebSocket error:', error);
+        document.getElementById('connectionStatus').textContent = 'Error';
+        document.getElementById('connectionStatus').style.color = 'red';
     });
 }
 
@@ -310,13 +334,7 @@ function connectToServer() {
 function sendMessage(message) {
     if (socket && socket.readyState === WebSocket.OPEN) {
         // For structured messages, we can use objects
-        const messageObj = {
-            type: 'message',
-            content: message,
-            timestamp: Date.now()
-        };
-        
-        socket.send(JSON.stringify(messageObj));
+        socket.send(JSON.stringify(message));
     } else {
         console.warn('Cannot send message, WebSocket is not connected');
     }
@@ -390,88 +408,174 @@ function setupKeyboardControls() {
     updateMovement();
 }
 
-// Perlin noise implementation (simplified for this context)
-// This is a basic implementation that provides a deterministic noise function
-function noise(x, z) {
-    // Simple hash function for pseudo-random values
-    function hash(x) {
-        x = ((x >> 16) ^ x) * 0x45d9f3b;
-        x = ((x >> 16) ^ x) * 0x45d9f3b;
-        x = (x >> 16) ^ x;
-        return x;
-    }
+// Update fish positions based on server data
+function updateFishPositions(fishData) {
+    if (!fishData) return;
     
-    // Generate 2D noise
-    const xi = Math.floor(x);
-    const zi = Math.floor(z);
-    const xf = x - xi;
-    const zf = z - zi;
+    // Get the currently loaded chunk keys for validation
+    const loadedChunkKeys = new Set(loadedChunks.keys());
     
-    // Hash coordinates for corners
-    const h00 = hash(xi + hash(zi)) % 1000 / 1000;
-    const h01 = hash(xi + hash(zi + 1)) % 1000 / 1000;
-    const h10 = hash((xi + 1) + hash(zi)) % 1000 / 1000;
-    const h11 = hash((xi + 1) + hash(zi + 1)) % 1000 / 1000;
-    
-    // Smoothing function
-    const sx = 3 * Math.pow(xf, 2) - 2 * Math.pow(xf, 3);
-    const sz = 3 * Math.pow(zf, 2) - 2 * Math.pow(zf, 3);
-    
-    // Interpolate
-    const v1 = h00 + sx * (h10 - h00);
-    const v2 = h01 + sx * (h11 - h01);
-    return v1 + sz * (v2 - v1);
-}
-
-// Create a single chunk at the specified chunk coordinates
-function createChunk(chunkX, chunkZ) {
-    const chunkGroup = new THREE.Group();
-    chunkGroup.name = `chunk_${chunkX}_${chunkZ}`;
-    
-    const coralGeometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
-    const coralMaterial = new THREE.MeshStandardMaterial({ color: 0x00aa44 }); // Coral green color
-    
-    // Calculate the world coordinates of the chunk origin
-    const worldX = chunkX * CHUNK_SIZE;
-    const worldZ = chunkZ * CHUNK_SIZE;
-    
-    // Place corals based on noise
-    for (let x = 0; x < CHUNK_SIZE; x++) {
-        for (let z = 0; z < CHUNK_SIZE; z++) {
-            // Sample noise at this position (using multiple octaves for more natural look)
-            const noiseValue = 
-                noise((worldX + x) * 0.1, (worldZ + z) * 0.1) * 0.5 + 
-                noise((worldX + x) * 0.2, (worldZ + z) * 0.2) * 0.3 + 
-                noise((worldX + x) * 0.4, (worldZ + z) * 0.4) * 0.2;
-            
-            // Use the noise value to determine if we should place a coral
-            if (noiseValue > 0.7) { // Only place corals above this threshold
-                const coral = new THREE.Mesh(coralGeometry, coralMaterial);
+    // Update existing fish entities and create new ones only if in loaded chunks
+    for (const fishId in fishData) {
+        const serverFish = fishData[fishId];
+        const fishIdInt = parseInt(serverFish.id);
+        
+        // Calculate the fish's chunk key
+        const fishChunkX = serverFish.chunkX !== undefined ? serverFish.chunkX : Math.floor(serverFish.position.x / CHUNK_SIZE);
+        const fishChunkZ = serverFish.chunkZ !== undefined ? serverFish.chunkZ : Math.floor(serverFish.position.z / CHUNK_SIZE);
+        const fishChunkKey = `${fishChunkX},${fishChunkZ}`;
+        
+        // Only process fish that are in loaded chunks
+        if (loadedChunkKeys.has(fishChunkKey)) {
+            // If this fish exists in our local entities, update it
+            if (fishEntities.has(fishIdInt)) {
+                const fishEntity = fishEntities.get(fishIdInt);
                 
-                // Position the coral with some random variation in height
-                coral.position.set(
-                    worldX + x + (Math.random() * 0.5 - 0.25), 
-                    -5 + (noiseValue - 0.7) * 3,  // Height based on noise value
-                    worldZ + z + (Math.random() * 0.5 - 0.25)
-                );
+                // Update the mesh position
+                fishEntity.mesh.position.x = serverFish.position.x;
+                fishEntity.mesh.position.y = serverFish.position.y;
+                fishEntity.mesh.position.z = serverFish.position.z;
                 
-                // Slightly randomize scale for variety
-                const scale = 0.8 + Math.random() * 0.4;
-                coral.scale.set(scale, scale, scale);
+                // Update the stored data including chunk information
+                fishEntity.data.position = serverFish.position;
+                fishEntity.data.velocity = serverFish.velocity;
                 
-                // Randomly rotate for more natural look
-                coral.rotation.y = Math.random() * Math.PI * 2;
+                // Check if fish has moved to a new chunk
+                if (serverFish.chunkX !== undefined && serverFish.chunkZ !== undefined) {
+                    const newChunkKey = `${serverFish.chunkX},${serverFish.chunkZ}`;
+                    
+                    // If fish changed chunks, and the new chunk is loaded, move it
+                    if (fishEntity.chunkKey !== newChunkKey && loadedChunkKeys.has(newChunkKey)) {
+                        // Remove from old chunk group
+                        if (fishChunkGroups.has(fishEntity.chunkKey)) {
+                            const oldGroup = fishChunkGroups.get(fishEntity.chunkKey);
+                            oldGroup.remove(fishEntity.mesh);
+                        }
+                        
+                        // Create new chunk group if it doesn't exist
+                        if (!fishChunkGroups.has(newChunkKey)) {
+                            const fishGroup = new THREE.Group();
+                            fishGroup.name = `fish_chunk_${newChunkKey}`;
+                            scene.add(fishGroup);
+                            fishChunkGroups.set(newChunkKey, fishGroup);
+                        }
+                        
+                        // Add to new chunk group
+                        const newGroup = fishChunkGroups.get(newChunkKey);
+                        newGroup.add(fishEntity.mesh);
+                        
+                        // Update fish data
+                        fishEntity.data.chunkX = serverFish.chunkX;
+                        fishEntity.data.chunkZ = serverFish.chunkZ;
+                        fishEntity.chunkKey = newChunkKey;
+                    }
+                    // If fish changed to an unloaded chunk, remove it
+                    else if (fishEntity.chunkKey !== newChunkKey && !loadedChunkKeys.has(newChunkKey)) {
+                        // Remove fish from its current group
+                        if (fishChunkGroups.has(fishEntity.chunkKey)) {
+                            const oldGroup = fishChunkGroups.get(fishEntity.chunkKey);
+                            oldGroup.remove(fishEntity.mesh);
+                        }
+                        // Remove from entities map
+                        fishEntities.delete(fishIdInt);
+                        console.log(`Removed fish ${fishIdInt} that moved to unloaded chunk ${newChunkKey}`);
+                    }
+                }
+            } else if (serverFish.id !== undefined) {
+                // If we don't have this fish yet and it's in a loaded chunk, create it
+                console.log(`Creating new fish with ID ${serverFish.id} from game state update in chunk ${fishChunkKey}`);
+                createFishEntity(serverFish);
+            }
+        } else {
+            // Fish is in an unloaded chunk - make sure it's not in our local entities
+            if (fishEntities.has(fishIdInt)) {
+                const fishEntity = fishEntities.get(fishIdInt);
                 
-                chunkGroup.add(coral);
+                // Remove from scene group if it exists
+                if (fishChunkGroups.has(fishEntity.chunkKey)) {
+                    const group = fishChunkGroups.get(fishEntity.chunkKey);
+                    group.remove(fishEntity.mesh);
+                }
+                
+                // Remove from entities map
+                fishEntities.delete(fishIdInt);
+                console.log(`Removed out-of-range fish ${fishIdInt} from unloaded chunk ${fishChunkKey}`);
             }
         }
     }
     
-    scene.add(chunkGroup);
-    return chunkGroup;
+    // Debug logging to check fish entities
+    if (Math.random() < 0.01) { // Only log occasionally to avoid console spam
+        console.log(`Current fish count: ${fishEntities.size}`);
+        console.log(`Current fish chunk groups: ${fishChunkGroups.size}`);
+        console.log(`Loaded chunks: ${loadedChunks.size}`);
+    }
 }
 
-// Update loaded chunks based on player position
+// Create a fish entity and its visual representation
+function createFishEntity(fishData) {
+    // Skip if we already have this fish
+    const fishIdInt = parseInt(fishData.id);
+    if (fishEntities.has(fishIdInt)) {
+        console.log(`Fish ${fishData.id} already exists, skipping creation`);
+        return;
+    }
+    
+    // Make sure we have a properly formatted data object with chunk info
+    const fishDataComplete = {
+        id: fishIdInt,
+        chunkX: fishData.chunkX !== undefined ? fishData.chunkX : Math.floor(fishData.position.x / CHUNK_SIZE),
+        chunkZ: fishData.chunkZ !== undefined ? fishData.chunkZ : Math.floor(fishData.position.z / CHUNK_SIZE),
+        position: { ...fishData.position },
+        velocity: fishData.velocity || { x: 0, y: 0, z: 0 }
+    };
+    
+    // Get or create the fish chunk group for this fish's chunk
+    const chunkKey = `${fishDataComplete.chunkX},${fishDataComplete.chunkZ}`;
+    
+    // Only create fish if the chunk is loaded
+    if (!loadedChunks.has(chunkKey)) {
+        console.log(`Skipping fish creation for unloaded chunk ${chunkKey}`);
+        return;
+    }
+    
+    // Create a red sphere for the fish
+    const fishGeometry = new THREE.SphereGeometry(0.3, 8, 8);
+    const fishMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 }); // Red color
+    const fishMesh = new THREE.Mesh(fishGeometry, fishMaterial);
+    
+    // Set fish position based on server data
+    fishMesh.position.set(
+        fishData.position.x, 
+        fishData.position.y, 
+        fishData.position.z
+    );
+    
+    // Create or get fish chunk group
+    if (!fishChunkGroups.has(chunkKey)) {
+        // Create a new group for this chunk if it doesn't exist
+        const fishGroup = new THREE.Group();
+        fishGroup.name = `fish_chunk_${chunkKey}`;
+        scene.add(fishGroup);
+        fishChunkGroups.set(chunkKey, fishGroup);
+    }
+    
+    // Add the fish to its chunk group
+    const fishGroup = fishChunkGroups.get(chunkKey);
+    fishGroup.add(fishMesh);
+    
+    // Store fish data and mesh together
+    fishEntities.set(fishIdInt, {
+        data: fishDataComplete,
+        mesh: fishMesh,
+        chunkKey: chunkKey
+    });
+    
+    console.log(`Created fish with ID ${fishData.id} at position:`, fishData.position, 
+                `in chunk (${fishDataComplete.chunkX}, ${fishDataComplete.chunkZ})`);
+}
+
+// Update chunks based on player position
 function updateChunks() {
     console.log(`Updating chunks for player position: ${player.position.x}, ${player.position.z}`);
     
@@ -498,7 +602,30 @@ function updateChunks() {
     for (const [chunkKey, chunkGroup] of loadedChunks.entries()) {
         if (!chunksToLoad.has(chunkKey)) {
             console.log(`Unloading chunk ${chunkKey}`);
+            
+            // Extract chunk coordinates from the key
+            const [chunkX, chunkZ] = chunkKey.split(',').map(Number);
+            
+            // Remove fish chunk group if it exists for this chunk
+            if (fishChunkGroups.has(chunkKey)) {
+                const fishGroup = fishChunkGroups.get(chunkKey);
+                console.log(`Removing fish group for chunk ${chunkKey} containing ${fishGroup.children.length} fish`);
+                
+                // Remove fish from entities map
+                for (const [fishId, fishEntity] of fishEntities.entries()) {
+                    if (fishEntity.chunkKey === chunkKey) {
+                        fishEntities.delete(fishId);
+                    }
+                }
+                
+                // Remove the fish group from the scene
+                scene.remove(fishGroup);
+                fishChunkGroups.delete(chunkKey);
+            }
+            
+            // Remove the chunk from the scene
             scene.remove(chunkGroup);
+            // Remove from the map
             loadedChunks.delete(chunkKey);
         }
     }
@@ -655,4 +782,127 @@ function setupGame() {
     });
     
     document.body.appendChild(testButton);
+}
+
+// Perlin noise implementation (simplified for this context)
+// This is a basic implementation that provides a deterministic noise function
+function noise(x, z) {
+    // Simple hash function for pseudo-random values
+    function hash(x) {
+        x = ((x >> 16) ^ x) * 0x45d9f3b;
+        x = ((x >> 16) ^ x) * 0x45d9f3b;
+        x = (x >> 16) ^ x;
+        return x;
+    }
+    
+    // Generate 2D noise
+    const xi = Math.floor(x);
+    const zi = Math.floor(z);
+    const xf = x - xi;
+    const zf = z - zi;
+    
+    // Hash coordinates for corners
+    const h00 = hash(xi + hash(zi)) % 1000 / 1000;
+    const h01 = hash(xi + hash(zi + 1)) % 1000 / 1000;
+    const h10 = hash((xi + 1) + hash(zi)) % 1000 / 1000;
+    const h11 = hash((xi + 1) + hash(zi + 1)) % 1000 / 1000;
+    
+    // Smoothing function
+    const sx = 3 * Math.pow(xf, 2) - 2 * Math.pow(xf, 3);
+    const sz = 3 * Math.pow(zf, 2) - 2 * Math.pow(zf, 3);
+    
+    // Interpolate
+    const v1 = h00 + sx * (h10 - h00);
+    const v2 = h01 + sx * (h11 - h01);
+    return v1 + sz * (v2 - v1);
+}
+
+// Create a single chunk at the specified chunk coordinates
+function createChunk(chunkX, chunkZ) {
+    const chunkGroup = new THREE.Group();
+    chunkGroup.name = `chunk_${chunkX}_${chunkZ}`;
+    
+    const coralGeometry = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+    const coralMaterial = new THREE.MeshStandardMaterial({ color: 0x00aa44 }); // Coral green color
+    
+    // Calculate the world coordinates of the chunk origin
+    const worldX = chunkX * CHUNK_SIZE;
+    const worldZ = chunkZ * CHUNK_SIZE;
+    
+    // Place corals based on noise
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+        for (let z = 0; z < CHUNK_SIZE; z++) {
+            // Sample noise at this position (using multiple octaves for more natural look)
+            const noiseValue = 
+                noise((worldX + x) * 0.1, (worldZ + z) * 0.1) * 0.5 + 
+                noise((worldX + x) * 0.2, (worldZ + z) * 0.2) * 0.3 + 
+                noise((worldX + x) * 0.4, (worldZ + z) * 0.4) * 0.2;
+            
+            // Use the noise value to determine if we should place a coral
+            if (noiseValue > 0.7) { // Only place corals above this threshold
+                const coral = new THREE.Mesh(coralGeometry, coralMaterial);
+                
+                // Position the coral with some random variation in height
+                coral.position.set(
+                    worldX + x + (Math.random() * 0.5 - 0.25), 
+                    -5 + (noiseValue - 0.7) * 3,  // Height based on noise value
+                    worldZ + z + (Math.random() * 0.5 - 0.25)
+                );
+                
+                // Slightly randomize scale for variety
+                const scale = 0.8 + Math.random() * 0.4;
+                coral.scale.set(scale, scale, scale);
+                
+                // Randomly rotate for more natural look
+                coral.rotation.y = Math.random() * Math.PI * 2;
+                
+                chunkGroup.add(coral);
+            }
+        }
+    }
+    
+    scene.add(chunkGroup);
+    return chunkGroup;
+}
+
+// Check if a fish should be visible based on current loaded chunks
+function isChunkLoaded(chunkX, chunkZ) {
+    return loadedChunks.has(`${chunkX},${chunkZ}`);
+}
+
+// Modify cleanupOutOfRangeFish function to more aggressively clean up fish
+function cleanupOutOfRangeFish() {
+    // Get set of currently loaded chunk keys
+    const loadedChunkKeys = new Set(loadedChunks.keys());
+    
+    // Clean up fish chunk groups for unloaded chunks
+    for (const [chunkKey, fishGroup] of fishChunkGroups.entries()) {
+        if (!loadedChunkKeys.has(chunkKey)) {
+            console.log(`Removing out-of-range fish group for chunk ${chunkKey}`);
+            
+            // Remove fish from entities map
+            for (const [fishId, fishEntity] of fishEntities.entries()) {
+                if (fishEntity.chunkKey === chunkKey) {
+                    fishEntities.delete(fishId);
+                }
+            }
+            
+            // Remove the fish group from the scene and clear its children
+            scene.remove(fishGroup);
+            while (fishGroup.children.length > 0) {
+                fishGroup.remove(fishGroup.children[0]);
+            }
+            fishChunkGroups.delete(chunkKey);
+        }
+    }
+    
+    // Additionally check all fish to make sure none are in unloaded chunks
+    for (const [fishId, fishEntity] of fishEntities.entries()) {
+        if (!loadedChunkKeys.has(fishEntity.chunkKey)) {
+            console.log(`Cleaning up stray fish ${fishId} from unloaded chunk ${fishEntity.chunkKey}`);
+            fishEntities.delete(fishId);
+        }
+    }
+    
+    console.log(`After cleanup: ${fishEntities.size} fish remain in ${fishChunkGroups.size} chunk groups`);
 } 

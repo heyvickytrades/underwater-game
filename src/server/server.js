@@ -24,12 +24,18 @@ let nextClientId = 0;
 // Game world constants
 const CHUNK_SIZE = 16;
 const MOVE_SPEED = 10; // Should match client move speed
+const FISH_PER_CHUNK = 5; // Number of fish to spawn per chunk
+let nextFishId = 0;
 
 // Track player positions, velocities, and their current chunks
 const playerPositions = new Map(); // Map of client ID to {x, y, z} position
 const playerVelocities = new Map(); // Map of client ID to {x, y, z} velocity
 const playerChunks = new Map(); // Map of client ID to {x, z} chunk coordinates
 const playerKeys = new Map(); // Map of client ID to key states {ArrowUp, ArrowDown, ArrowLeft, ArrowRight}
+
+// Track fish entities
+const fishEntities = new Map(); // Map of fish ID to fish data {id, chunkX, chunkZ, position, velocity}
+const loadedChunks = new Set(); // Set of loaded chunk keys in the format "x,z"
 
 // Handle WebSocket connections
 wss.on('connection', (ws) => {
@@ -84,6 +90,21 @@ wss.on('connection', (ws) => {
                     // Update player's chunk
                     playerChunks.set(clientId, { x: chunkX, z: chunkZ });
                     
+                    // Check if we need to load new chunks (and spawn fish)
+                    for (let dx = -2; dx <= 2; dx++) {
+                        for (let dz = -2; dz <= 2; dz++) {
+                            const newChunkX = chunkX + dx;
+                            const newChunkZ = chunkZ + dz;
+                            const chunkKey = `${newChunkX},${newChunkZ}`;
+                            
+                            // If this chunk is not already loaded, spawn fish for it
+                            if (!loadedChunks.has(chunkKey)) {
+                                loadedChunks.add(chunkKey);
+                                spawnFishForChunk(newChunkX, newChunkZ);
+                            }
+                        }
+                    }
+                    
                     // Notify client about chunk change
                     ws.send(JSON.stringify({
                         type: 'chunkUpdate',
@@ -112,13 +133,105 @@ wss.on('connection', (ws) => {
         type: 'welcome',
         id: clientId
     }));
+    
+    // Send current fish data
+    const fishData = {};
+    for (const [fishId, fish] of fishEntities.entries()) {
+        fishData[fishId] = fish;
+    }
+    if (Object.keys(fishData).length > 0) {
+        ws.send(JSON.stringify({
+            type: 'fishInit',
+            fish: fishData
+        }));
+    }
 });
 
-// Game state (will be expanded in future steps)
-const gameState = {
-    timestamp: Date.now(),
-    players: {} // Will contain player positions for broadcasting
-};
+// Spawn fish for a given chunk
+function spawnFishForChunk(chunkX, chunkZ) {
+    console.log(`Spawning fish for chunk ${chunkX},${chunkZ}`);
+    
+    // Spawn FISH_PER_CHUNK fish in random positions within the chunk
+    for (let i = 0; i < FISH_PER_CHUNK; i++) {
+        const fishId = nextFishId++;
+        
+        // Random position within the chunk
+        const x = chunkX * CHUNK_SIZE + Math.random() * CHUNK_SIZE;
+        const y = -3 + Math.random() * 2; // Random height between -3 and -1
+        const z = chunkZ * CHUNK_SIZE + Math.random() * CHUNK_SIZE;
+        
+        // Create fish entity
+        const fish = {
+            id: fishId,
+            chunkX: chunkX,
+            chunkZ: chunkZ,
+            position: { x, y, z },
+            velocity: { x: 0, y: 0, z: 0 },
+            lastDirectionChange: Date.now()
+        };
+        
+        // Add to fish entities map
+        fishEntities.set(fishId, fish);
+        
+        // Broadcast fish creation to all clients
+        wss.clients.forEach((client) => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify({
+                    type: 'fishSpawn',
+                    fish: fish
+                }));
+            }
+        });
+    }
+}
+
+// Update fish positions with simple AI behavior
+function updateFishPositions() {
+    const now = Date.now();
+    
+    for (const [fishId, fish] of fishEntities.entries()) {
+        // Change direction randomly every ~3 seconds
+        if (now - fish.lastDirectionChange > 3000 || Math.random() < 0.01) {
+            fish.velocity = {
+                x: (Math.random() * 2 - 1) * 2, // Random velocity between -2 and 2
+                y: (Math.random() * 2 - 1) * 0.5, // Smaller vertical movement
+                z: (Math.random() * 2 - 1) * 2
+            };
+            fish.lastDirectionChange = now;
+        }
+        
+        // Update position based on velocity
+        fish.position.x += fish.velocity.x * 0.02; // Scale by time factor
+        fish.position.y += fish.velocity.y * 0.02;
+        fish.position.z += fish.velocity.z * 0.02;
+        
+        // Keep fish within their chunk boundaries (with some margin)
+        const chunkMinX = fish.chunkX * CHUNK_SIZE + 2;
+        const chunkMaxX = (fish.chunkX + 1) * CHUNK_SIZE - 2;
+        const chunkMinZ = fish.chunkZ * CHUNK_SIZE + 2;
+        const chunkMaxZ = (fish.chunkZ + 1) * CHUNK_SIZE - 2;
+        
+        // Keep the fish within vertical boundaries
+        const minY = -4.5;
+        const maxY = -1;
+        
+        // If fish is trying to leave the chunk, reverse its direction
+        if (fish.position.x < chunkMinX || fish.position.x > chunkMaxX) {
+            fish.velocity.x *= -1;
+            fish.position.x = Math.max(chunkMinX, Math.min(chunkMaxX, fish.position.x));
+        }
+        
+        if (fish.position.z < chunkMinZ || fish.position.z > chunkMaxZ) {
+            fish.velocity.z *= -1;
+            fish.position.z = Math.max(chunkMinZ, Math.min(chunkMaxZ, fish.position.z));
+        }
+        
+        if (fish.position.y < minY || fish.position.y > maxY) {
+            fish.velocity.y *= -1;
+            fish.position.y = Math.max(minY, Math.min(maxY, fish.position.y));
+        }
+    }
+}
 
 // Process player movement based on key states
 function updatePlayerPositions() {
@@ -154,10 +267,20 @@ function updatePlayerPositions() {
     }
 }
 
+// Game state (will be expanded in future steps)
+const gameState = {
+    timestamp: Date.now(),
+    players: {}, // Will contain player positions for broadcasting
+    fish: {} // Will contain fish positions for broadcasting
+};
+
 // Game loop - runs every 100ms
 const gameLoop = setInterval(() => {
     // Update player positions based on key states
     updatePlayerPositions();
+    
+    // Update fish positions with AI movement
+    updateFishPositions();
     
     // Update game state
     gameState.timestamp = Date.now();
@@ -166,6 +289,18 @@ const gameLoop = setInterval(() => {
     gameState.players = {};
     for (const [clientId, position] of playerPositions.entries()) {
         gameState.players[clientId] = position;
+    }
+    
+    // Update fish positions in game state
+    gameState.fish = {};
+    for (const [fishId, fish] of fishEntities.entries()) {
+        gameState.fish[fishId] = {
+            id: fish.id,
+            position: fish.position,
+            velocity: fish.velocity,
+            chunkX: fish.chunkX,
+            chunkZ: fish.chunkZ
+        };
     }
     
     // Log a simple message to show game loop is working
