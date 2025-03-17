@@ -1,4 +1,6 @@
 // Underwater Odyssey - Client-Side Main Script
+import { WaterShader, PlanktonParticleSystem, UnderwaterFogEffect, UnderwaterSoundManager } from './waterEffect.js';
+
 console.log('Underwater Odyssey client loaded!');
 
 // ThreeJS variables
@@ -12,6 +14,14 @@ const fixedTimeStep = 1.0 / 60.0; // 60 fps physics
 let socket;
 let clientId = null;
 
+// Keyboard state for direct movement control
+const keyState = {
+    ArrowUp: false,
+    ArrowDown: false,
+    ArrowLeft: false,
+    ArrowRight: false
+};
+
 // Chunk system variables
 const CHUNK_SIZE = 16; // Size of each chunk in world units
 const LOAD_RADIUS = 2; // Number of chunks to load in each direction
@@ -24,6 +34,15 @@ const otherPlayers = new Map(); // Map of clientId to player mesh
 // Fish entities 
 const fishEntities = new Map(); // Map of fishId to fish data and mesh
 const fishChunkGroups = new Map(); // Map of "chunkX,chunkZ" keys to THREE.Group objects for fish
+let lastFishUpdateTime = 0; // Track when we last got fish updates from the server
+
+// Environmental effects
+let waterShaderMaterial;
+let waterSurface;
+let planktonParticles;
+let underwaterFog;
+let soundManager;
+let lastUpdateTime = 0;
 
 // Initialize ThreeJS and Cannon.js
 function initializeGame() {
@@ -41,6 +60,10 @@ function initializeGame() {
         
         console.log('Libraries loaded successfully');
         
+        // Show debug info first so the elements exist when we reference them later
+        document.getElementById('gameUI').style.display = 'block';
+        document.getElementById('debugInfo').style.display = 'block';
+        
         // Create ThreeJS scene
         scene = new THREE.Scene();
         scene.background = new THREE.Color(0x0a121f); // Dark blue background for underwater effect
@@ -48,171 +71,503 @@ function initializeGame() {
         // Create camera
         const aspectRatio = window.innerWidth / window.innerHeight;
         camera = new THREE.PerspectiveCamera(75, aspectRatio, 0.1, 1000);
-        // Position the camera to see the player clearly - higher and further back
-        camera.position.set(0, 10, 15);
-        camera.lookAt(0, 0, 0);
-
+        
         // Create renderer
-        renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('gameCanvas'), antialias: true });
+        renderer = new THREE.WebGLRenderer({
+            canvas: document.getElementById('gameCanvas'),
+            antialias: true
+        });
+        
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(window.devicePixelRatio);
-
-        // Add ambient light
-        const ambientLight = new THREE.AmbientLight(0xcccccc, 0.5);
+        
+        // Create lights
+        const ambientLight = new THREE.AmbientLight(0x555566, 0.6);
         scene.add(ambientLight);
-
-        // Add directional light for better visibility
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        directionalLight.position.set(0, 10, 5);
+        
+        const directionalLight = new THREE.DirectionalLight(0xaaccff, 0.8);
+        directionalLight.position.set(1, 1, 1);
         scene.add(directionalLight);
-
-        // Initialize Cannon.js physics world
+        
+        // Create physics world
         physicsWorld = new CANNON.World();
-        physicsWorld.gravity.set(0, 0, 0); // Zero gravity for underwater environment
+        physicsWorld.gravity.set(0, 0, 0); // No gravity for underwater
         physicsWorld.defaultContactMaterial.friction = 0.0;
-        physicsWorld.defaultContactMaterial.restitution = 0.3; // Slight bounciness
-
-        // Create player model (a green cube)
+        physicsWorld.defaultContactMaterial.restitution = 0.3;
+        
+        // Create player (green cube)
         const playerGeometry = new THREE.BoxGeometry(1, 1, 1);
-        const playerMaterial = new THREE.MeshStandardMaterial({ color: 0x00ff00 }); // Green color
+        const playerMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00 });
         player = new THREE.Mesh(playerGeometry, playerMaterial);
+        player.position.set(0, 0, 0);
         scene.add(player);
-
+        
         // Create player physics body
-        const playerShape = new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5)); // Half-extents
+        const playerShape = new CANNON.Box(new CANNON.Vec3(0.5, 0.5, 0.5));
         playerBody = new CANNON.Body({
-            mass: 5, // Mass for physics interactions
-            position: new CANNON.Vec3(0, 0, 0)
+            mass: 5,
+            position: new CANNON.Vec3(0, 0, 0),
+            shape: playerShape
         });
-        playerBody.addShape(playerShape);
-        playerBody.linearDamping = 0.9; // High damping for underwater effect
+        playerBody.linearDamping = 0.9; // High damping to simulate water resistance
         physicsWorld.addBody(playerBody);
-
-        // Add underwater grid for reference (ocean floor)
-        const gridHelper = new THREE.GridHelper(50, 50, 0x0088ff, 0x0044aa);
-        gridHelper.position.y = -5;
+        
+        // Initialize camera position
+        camera.position.set(0, 2, 5);
+        camera.lookAt(player.position);
+        
+        // Create a grid as a reference for underwater ground
+        const gridHelper = new THREE.GridHelper(100, 100, 0x0088ff, 0x0044aa);
+        gridHelper.position.y = -10;
         scene.add(gridHelper);
         
-        // Add some ambient objects to make the scene more visible
-        const seaFloor = new THREE.Mesh(
-            new THREE.PlaneGeometry(100, 100),
-            new THREE.MeshStandardMaterial({ color: 0x004466 })
-        );
-        seaFloor.rotation.x = -Math.PI / 2;
-        seaFloor.position.y = -5.1;
-        scene.add(seaFloor);
-
-        // Set up keyboard controls for movement
-        setupKeyboardControls();
-
-        // Handle window resize
-        window.addEventListener('resize', onWindowResize);
-
-        // Initialize the first chunks
-        updateChunks();
-
-        // Hide loading screen
-        const loadingScreen = document.getElementById('loadingScreen');
-        if (loadingScreen) {
-            loadingScreen.style.display = 'none';
-        }
-
-        // Add debug position display
-        const debugInfo = document.createElement('div');
-        debugInfo.id = 'debugInfo';
-        debugInfo.style.position = 'absolute';
-        debugInfo.style.top = '10px';
-        debugInfo.style.left = '10px';
-        debugInfo.style.padding = '5px 10px';
-        debugInfo.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-        debugInfo.style.color = 'white';
-        debugInfo.style.fontFamily = 'Arial, sans-serif';
-        debugInfo.style.fontSize = '12px';
-        debugInfo.style.borderRadius = '3px';
-        debugInfo.style.zIndex = '1000';
-        debugInfo.textContent = 'Position: 0, 0, 0';
-        document.body.appendChild(debugInfo);
-
-        // Start animation loop
-        animate(0);
+        // Add a plane to represent the sea floor
+        const floorGeometry = new THREE.PlaneGeometry(500, 500);
+        const floorMaterial = new THREE.MeshLambertMaterial({
+            color: 0x006688,
+            side: THREE.DoubleSide
+        });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = Math.PI / 2;
+        floor.position.y = -10;
+        scene.add(floor);
         
-        console.log('Game initialization complete');
+        // Create a water surface plane above
+        const waterGeometry = new THREE.PlaneGeometry(500, 500, 50, 50);
+        waterSurface = new THREE.Mesh(waterGeometry, waterShaderMaterial);
+        waterSurface.rotation.x = Math.PI / 2;
+        waterSurface.position.y = 15; // Place above the scene
+        scene.add(waterSurface);
+        
+        // Initialize environmental effects
+        
+        // Initialize particle system for plankton
+        initPlanktonParticles();
+        
+        // Initialize underwater fog
+        initUnderwaterFog();
+        
+        // Initialize sound manager
+        initSoundManager();
+        
+        // Start the game
+        window.addEventListener('resize', onWindowResize);
+        setupKeyboardControls();
+        
+        // Initialize first chunks
+        updateChunks();
+        
+        // Start the animation loop
+        lastTime = performance.now();
+        requestAnimationFrame(animate);
+        
+        console.log('Game initialized successfully');
         return true;
     } catch (error) {
-        console.error('Game initialization failed:', error);
-        const errorMessage = document.getElementById('errorMessage');
-        if (errorMessage) {
-            errorMessage.textContent = 'Error initializing game: ' + error.message;
-        }
+        console.error('Error initializing game:', error);
+        document.getElementById('errorMessage').textContent = error.message;
         return false;
+    }
+}
+
+// Initialize plankton particle system
+function initPlanktonParticles() {
+    try {
+        // Create particle geometry
+        const particleGeometry = new THREE.BufferGeometry();
+        
+        // Number of particles
+        const particleCount = 3000; // Increased from 2000 for better coverage
+        const range = 60; // Increased from 50 for wider spread
+        
+        // Create positions array
+        const positions = new Float32Array(particleCount * 3);
+        const sizes = new Float32Array(particleCount);
+        
+        for (let i = 0; i < particleCount; i++) {
+            // Random position within range, centered at origin (0,0,0)
+            positions[i * 3] = (Math.random() - 0.5) * range;
+            positions[i * 3 + 1] = (Math.random() - 0.5) * (range / 2) - 2; // More concentrated vertically, slightly below center
+            positions[i * 3 + 2] = (Math.random() - 0.5) * range;
+            
+            // Random size variation
+            sizes[i] = Math.random() * 0.5 + 0.1;
+        }
+        
+        // Add attributes to the geometry
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+        
+        // Create particle material
+        const particleMaterial = new THREE.PointsMaterial({
+            color: 0xffffff,
+            size: 0.2, // Slightly larger from 0.1 for better visibility
+            transparent: true,
+            opacity: 0.4, // Slightly more opaque from 0.3 for better visibility
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        
+        // Create the particle system
+        planktonParticles = new THREE.Points(particleGeometry, particleMaterial);
+        planktonParticles.userData.positions = positions;
+        planktonParticles.userData.sizes = sizes;
+        
+        // Set up initial water current
+        planktonParticles.userData.current = {
+            direction: new THREE.Vector3(1, 0.2, 0.5).normalize(),
+            speed: 0.2
+        };
+        
+        // Position the particle system at the player's location initially
+        if (player) {
+            planktonParticles.position.copy(player.position);
+        }
+        
+        scene.add(planktonParticles);
+        console.log("Plankton particle system initialized");
+    } catch (error) {
+        console.error('Error initializing plankton particles:', error);
+    }
+}
+
+// Initialize underwater fog
+function initUnderwaterFog() {
+    try {
+        // Add exponential fog for a more realistic underwater look
+        scene.fog = new THREE.FogExp2(0x0a4a9e, 0.02);
+    } catch (error) {
+        console.error('Error initializing underwater fog:', error);
+    }
+}
+
+// Initialize sound manager
+function initSoundManager() {
+    try {
+        console.log("Initializing sound manager...");
+        
+        // Create an audio listener and add it to the camera
+        const listener = new THREE.AudioListener();
+        camera.add(listener);
+        
+        // Create ambient underwater sound
+        const ambientSound = new THREE.Audio(listener);
+        
+        // Create sound manager object
+        soundManager = {
+            listener: listener,
+            sounds: {
+                ambient: ambientSound,
+                bubbles: null,
+                whale: null
+            },
+            initialized: false,  // Will be set to true once sounds are loaded
+            play: function(name) {
+                if (this.sounds[name] && !this.sounds[name].isPlaying) {
+                    console.log(`Playing sound: ${name}`);
+                    this.sounds[name].play();
+                } else if (!this.sounds[name]) {
+                    console.warn(`Sound not found: ${name}`);
+                } else {
+                    console.log(`Sound already playing: ${name}`);
+                }
+            },
+            stop: function(name) {
+                if (this.sounds[name] && this.sounds[name].isPlaying) {
+                    console.log(`Stopping sound: ${name}`);
+                    this.sounds[name].stop();
+                }
+            }
+        };
+        
+        // Load ambient underwater sound
+        const audioLoader = new THREE.AudioLoader();
+        
+        console.log("Loading ambient sound...");
+        audioLoader.load('sounds/underwater_ambient.mp3', 
+            // onLoad callback
+            function(buffer) {
+                console.log("Ambient sound loaded successfully");
+                ambientSound.setBuffer(buffer);
+                ambientSound.setLoop(true);
+                ambientSound.setVolume(0.5);
+                soundManager.initialized = true;
+                
+                // Don't autoplay - we'll play it after user interaction
+                console.log("Sound manager ready");
+            }, 
+            // onProgress
+            function(xhr) {
+                console.log('Sound loading: ' + (xhr.loaded / xhr.total * 100).toFixed(1) + '% loaded');
+            }, 
+            // onError
+            function(error) {
+                console.error('Error loading sound:', error);
+            }
+        );
+        
+        // Also load bubble sounds
+        const bubblesSound = new THREE.Audio(listener);
+        audioLoader.load('sounds/bubbles.mp3',
+            function(buffer) {
+                console.log("Bubbles sound loaded successfully");
+                bubblesSound.setBuffer(buffer);
+                bubblesSound.setLoop(false);
+                bubblesSound.setVolume(0.3);
+                soundManager.sounds.bubbles = bubblesSound;
+            },
+            null,
+            function(error) {
+                console.error('Error loading bubbles sound:', error);
+            }
+        );
+        
+        // Also load whale sounds
+        const whaleSound = new THREE.Audio(listener);
+        audioLoader.load('sounds/whale.mp3',
+            function(buffer) {
+                console.log("Whale sound loaded successfully");
+                whaleSound.setBuffer(buffer);
+                whaleSound.setLoop(false);
+                whaleSound.setVolume(0.4);
+                soundManager.sounds.whale = whaleSound;
+            },
+            null,
+            function(error) {
+                console.error('Error loading whale sound:', error);
+            }
+        );
+        
+    } catch (error) {
+        console.error('Error initializing sound manager:', error);
+        soundManager = { initialized: false, sounds: {} };
     }
 }
 
 // Handle window resize
 function onWindowResize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    
+    camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    
+    renderer.setSize(width, height);
 }
 
 // Animation loop
 function animate(time) {
+    requestAnimationFrame(animate);
+    
     try {
-        requestAnimationFrame(animate);
-        
-        // Skip animation if player or scene isn't initialized yet
-        if (!player || !scene || !camera || !renderer) {
-            console.warn("Animation loop running but game objects not initialized yet");
+        // Check if essential components are initialized
+        if (!player || !playerBody || !scene || !camera || !renderer) {
+            console.warn("Essential game components not initialized yet, skipping animation frame");
             return;
         }
         
-        // Calculate time delta for physics
         const deltaTime = (time - lastTime) / 1000;
         lastTime = time;
         
-        // Update physics world
-        physicsWorld.step(fixedTimeStep, deltaTime, 3);
+        // Apply movement from keyboard state
+        applyKeyboardMovement();
         
-        // Update player mesh position from physics body
+        // Update physics world with a fixed time step
+        physicsWorld.step(fixedTimeStep);
+        
+        // Update player position from physics body
         player.position.copy(playerBody.position);
         player.quaternion.copy(playerBody.quaternion);
         
-        // Log player position occasionally (every 100 frames)
-        if (Math.floor(time / 1000) % 5 === 0 && Math.floor(time * 10) % 10 === 0) {
-            console.log(`Player position: x=${player.position.x.toFixed(2)}, y=${player.position.y.toFixed(2)}, z=${player.position.z.toFixed(2)}`);
-            console.log(`Camera position: x=${camera.position.x.toFixed(2)}, y=${camera.position.y.toFixed(2)}, z=${camera.position.z.toFixed(2)}`);
-        }
+        // Position camera behind player
+        const cameraOffset = new THREE.Vector3(0, 2, 5);
+        cameraOffset.applyQuaternion(player.quaternion);
+        camera.position.copy(player.position).add(cameraOffset);
+        camera.lookAt(player.position);
         
-        // Update debug position display
-        const debugInfo = document.getElementById('debugInfo');
-        if (debugInfo) {
-            debugInfo.textContent = `Position: x=${player.position.x.toFixed(2)}, y=${player.position.y.toFixed(2)}, z=${player.position.z.toFixed(2)}`;
-        }
+        // Update UI with position and direction
+        updateUI();
         
-        // Check if player has moved to a new chunk
-        const playerChunkX = Math.floor(player.position.x / CHUNK_SIZE);
-        const playerChunkZ = Math.floor(player.position.z / CHUNK_SIZE);
+        // Check if chunks need to be updated
+        const newChunkX = Math.floor(player.position.x / CHUNK_SIZE);
+        const newChunkZ = Math.floor(player.position.z / CHUNK_SIZE);
         
-        if (playerChunkX !== currentPlayerChunk.x || playerChunkZ !== currentPlayerChunk.z) {
-            currentPlayerChunk.x = playerChunkX;
-            currentPlayerChunk.z = playerChunkZ;
+        if (newChunkX !== currentPlayerChunk.x || newChunkZ !== currentPlayerChunk.z) {
+            currentPlayerChunk.x = newChunkX;
+            currentPlayerChunk.z = newChunkZ;
             updateChunks();
         }
         
-        // Periodically check for fish that should be removed (every second based on animation time)
-        if (Math.floor(time) % 1000 < 20) {
-            cleanupOutOfRangeFish();
+        // Update fish positions locally between server updates
+        updateLocalFishPositions(deltaTime);
+        
+        // Update environmental effects
+        
+        // Update water shader with time
+        if (waterShaderMaterial) {
+            waterShaderMaterial.uniforms.time.value = time * 0.001;
         }
         
-        // Send position update to server (throttled to every 10 frames to reduce network traffic)
-        if (time % 10 < 1 && socket && socket.readyState === WebSocket.OPEN) {
-            sendPositionUpdate();
+        // Subtle wave motion for the water surface
+        if (waterSurface && waterSurface.geometry && waterSurface.geometry.attributes.position) {
+            const vertices = waterSurface.geometry.attributes.position.array;
+            for (let i = 0; i < vertices.length; i += 3) {
+                const x = vertices[i];
+                const z = vertices[i+2];
+                vertices[i+1] = 
+                    Math.sin(time * 0.001 + x * 0.05) * 0.5 + 
+                    Math.cos(time * 0.0015 + z * 0.05) * 0.5;
+            }
+            waterSurface.geometry.attributes.position.needsUpdate = true;
         }
         
-        // Render scene
+        // Update plankton particles
+        updatePlanktonParticles(deltaTime, time);
+        
+        // Update fog based on depth
+        if (underwaterFog) {
+            const depth = Math.abs(player.position.y);
+            underwaterFog.updateWithDepth(depth);
+        }
+        
+        // Update UI depth display
+        const depthElement = document.getElementById('environmentInfo');
+        if (depthElement) {
+            const depth = Math.abs(player.position.y).toFixed(1);
+            
+            // Determine biome based on depth
+            let biome = 'Coral Reef';
+            if (depth > 10) {
+                biome = 'Deep Sea';
+            } else if (depth > 5) {
+                biome = 'Mid-Ocean';
+            }
+            
+            depthElement.textContent = `Depth: ${depth}m | Biome: ${biome}`;
+        }
+        
+        // Render the scene
         renderer.render(scene, camera);
     } catch (error) {
-        console.error("Error in animation loop:", error);
+        console.error('Error in animation loop:', error);
+    }
+}
+
+// Update plankton particles
+function updatePlanktonParticles(deltaTime, time) {
+    if (!planktonParticles || !planktonParticles.userData || !player) return;
+    
+    const positions = planktonParticles.geometry.attributes.position.array;
+    const current = planktonParticles.userData.current;
+    
+    // Occasionally update the current direction to make it feel more dynamic
+    if (time - lastUpdateTime > 5000) { // Every 5 seconds
+        const angle = Math.random() * Math.PI * 2;
+        current.direction = new THREE.Vector3(
+            Math.cos(angle),
+            (Math.random() - 0.5) * 0.2,
+            Math.sin(angle)
+        ).normalize();
+        current.speed = 0.1 + Math.random() * 0.2;
+        lastUpdateTime = time;
+    }
+    
+    // Apply current to player for subtle drift
+    if (playerBody) {
+        playerBody.velocity.x += current.direction.x * current.speed * deltaTime * 0.05;
+        playerBody.velocity.y += current.direction.y * current.speed * deltaTime * 0.05;
+        playerBody.velocity.z += current.direction.z * current.speed * deltaTime * 0.05;
+    }
+    
+    // Move the entire particle system with the player
+    planktonParticles.position.copy(player.position);
+    
+    // Update particles based on current and random motion
+    for (let i = 0; i < positions.length; i += 3) {
+        // Apply water current movement (now relative to the system's position)
+        positions[i] += current.direction.x * current.speed * deltaTime;
+        positions[i + 1] += current.direction.y * current.speed * deltaTime;
+        positions[i + 2] += current.direction.z * current.speed * deltaTime;
+        
+        // Add a bit of random movement
+        positions[i] += (Math.random() - 0.5) * 0.01;
+        positions[i + 1] += (Math.random() - 0.5) * 0.01;
+        positions[i + 2] += (Math.random() - 0.5) * 0.01;
+        
+        // Wrap particles around the center (not player position, since the system moves with player)
+        const range = 50;
+        
+        if (Math.abs(positions[i]) > range / 2) {
+            positions[i] = (positions[i] > 0 ? -1 : 1) * (range / 2) * 0.9;
+        }
+        
+        if (Math.abs(positions[i + 1]) > range / 4) {
+            positions[i + 1] = (positions[i + 1] > 0 ? -1 : 1) * (range / 4) * 0.9;
+        }
+        
+        if (Math.abs(positions[i + 2]) > range / 2) {
+            positions[i + 2] = (positions[i + 2] > 0 ? -1 : 1) * (range / 2) * 0.9;
+        }
+    }
+    
+    // Mark attributes as needing update
+    planktonParticles.geometry.attributes.position.needsUpdate = true;
+}
+
+// Update UI elements
+function updateUI() {
+    const environmentInfo = document.getElementById('environmentInfo');
+    const directionText = document.getElementById('directionText');
+    const compassIndicator = document.getElementById('compassIndicator');
+    
+    if (environmentInfo && player) {
+        // Calculate depth based on player Y position
+        const depth = Math.abs(Math.min(player.position.y, 0)).toFixed(1);
+        
+        // Determine biome based on depth and location
+        let biome = 'Coral Reef';
+        if (depth > 5) {
+            biome = 'Mid Ocean';
+        }
+        if (depth > 8) {
+            biome = 'Deep Sea';
+        }
+        
+        // Update environment info display
+        environmentInfo.textContent = `Depth: ${depth}m | Biome: ${biome}`;
+    }
+    
+    if (directionText && compassIndicator && player) {
+        // Get the forward direction vector
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+        
+        // Calculate angle (in radians) between the forward direction and world coordinate system
+        const angle = Math.atan2(forward.x, forward.z);
+        
+        // Convert to degrees and ensure positive value (0-360)
+        const degrees = ((angle * 180 / Math.PI) + 360) % 360;
+        
+        // Get the direction name
+        let direction = 'North';
+        if (degrees >= 22.5 && degrees < 67.5) {
+            direction = 'Northeast';
+        } else if (degrees >= 67.5 && degrees < 112.5) {
+            direction = 'East';
+        } else if (degrees >= 112.5 && degrees < 157.5) {
+            direction = 'Southeast';
+        } else if (degrees >= 157.5 && degrees < 202.5) {
+            direction = 'South';
+        } else if (degrees >= 202.5 && degrees < 247.5) {
+            direction = 'Southwest';
+        } else if (degrees >= 247.5 && degrees < 292.5) {
+            direction = 'West';
+        } else if (degrees >= 292.5 && degrees < 337.5) {
+            direction = 'Northwest';
+        }
+        
+        // Update text and rotate the compass indicator
+        directionText.textContent = direction;
+        compassIndicator.style.transform = `rotate(${degrees}deg)`;
     }
 }
 
@@ -252,7 +607,7 @@ function connectToServer() {
     
     // Create WebSocket connection
     socket = new WebSocket(wsUrl);
-
+    
     // Connection opened
     socket.addEventListener('open', (event) => {
         console.log('Connected to WebSocket server');
@@ -268,7 +623,7 @@ function connectToServer() {
         try {
             const message = JSON.parse(event.data);
             console.log('Received:', message);
-
+            
             // Handle welcome message
             if (message.type === 'welcome') {
                 clientId = message.id;
@@ -284,6 +639,7 @@ function connectToServer() {
                     const fish = message.fish[fishId];
                     createFishEntity(fish);
                 }
+                lastFishUpdateTime = performance.now();
             }
             
             // Handle fish spawn
@@ -291,7 +647,7 @@ function connectToServer() {
                 console.log('Fish spawned:', message.fish);
                 createFishEntity(message.fish);
             }
-
+            
             // Handle game state updates
             else if (message.type === 'gameState') {
                 // Update player positions based on server data
@@ -299,6 +655,7 @@ function connectToServer() {
                 
                 // Update fish positions based on server data
                 updateFishPositions(message.data.fish);
+                lastFishUpdateTime = performance.now();
             }
 
             // Handle chunk updates
@@ -311,7 +668,7 @@ function connectToServer() {
             console.error('Error parsing message:', error);
         }
     });
-
+    
     // Socket closed event
     socket.addEventListener('close', (event) => {
         console.log('Connection closed');
@@ -321,7 +678,7 @@ function connectToServer() {
         // Attempt to reconnect after 2 seconds
         setTimeout(connectToServer, 2000);
     });
-
+    
     // Socket error event
     socket.addEventListener('error', (error) => {
         console.error('WebSocket error:', error);
@@ -342,70 +699,92 @@ function sendMessage(message) {
 
 // Setup keyboard controls for player movement
 function setupKeyboardControls() {
-    const keys = {
-        ArrowUp: false,
-        ArrowDown: false,
-        ArrowLeft: false,
-        ArrowRight: false
-    };
+    console.log("Setting up keyboard controls...");
     
     const moveSpeed = 10; // Movement speed
     
     // Track key presses
     window.addEventListener('keydown', (event) => {
-        if (keys.hasOwnProperty(event.key)) {
-            if (!keys[event.key]) { // Only send message if state changes
-                keys[event.key] = true;
+        console.log("Key pressed:", event.key);
+        if (keyState.hasOwnProperty(event.key)) {
+            if (!keyState[event.key]) { // Only send message if state changes
+                keyState[event.key] = true;
+                console.log(`Key ${event.key} pressed, sending to server`);
+                
                 // Send key press event to server
                 sendMessage({
                     type: 'keyPress',
                     key: event.key,
                     pressed: true
                 });
+                
+                // Directly apply movement to player body for immediate response
+                applyMovement();
             }
         }
     });
     
     window.addEventListener('keyup', (event) => {
-        if (keys.hasOwnProperty(event.key)) {
-            keys[event.key] = false;
+        console.log("Key released:", event.key);
+        if (keyState.hasOwnProperty(event.key)) {
+            keyState[event.key] = false;
+            console.log(`Key ${event.key} released, sending to server`);
+            
             // Send key release event to server
             sendMessage({
                 type: 'keyPress',
                 key: event.key,
                 pressed: false
             });
+            
+            // Directly apply movement to player body for immediate response
+            applyMovement();
         }
     });
     
     // Apply forces based on key presses
-    function updateMovement() {
+    function applyMovement() {
+        if (!playerBody) {
+            console.log("Player body not initialized yet, can't apply movement");
+            return;
+        }
+        
         // Reset velocity first for better control
         playerBody.velocity.x = 0;
         playerBody.velocity.z = 0;
         
         // Forward/backward movement
-        if (keys.ArrowUp) {
+        if (keyState.ArrowUp) {
             playerBody.velocity.z = -moveSpeed;
-        } else if (keys.ArrowDown) {
+            console.log("Moving forward");
+        } else if (keyState.ArrowDown) {
             playerBody.velocity.z = moveSpeed;
+            console.log("Moving backward");
         }
         
         // Left/right movement
-        if (keys.ArrowLeft) {
+        if (keyState.ArrowLeft) {
             playerBody.velocity.x = -moveSpeed;
-        } else if (keys.ArrowRight) {
+            console.log("Moving left");
+        } else if (keyState.ArrowRight) {
             playerBody.velocity.x = moveSpeed;
+            console.log("Moving right");
         }
         
         // Apply damping for smooth underwater movement
         playerBody.linearDamping = 0.9;
-        
-        requestAnimationFrame(updateMovement);
     }
     
-    // Start the movement update loop
-    updateMovement();
+    // This function will be called each frame from animate() to ensure we're always checking keys
+    function updateMovement() {
+        applyMovement();
+    }
+    
+    // Call the first application of movement
+    applyMovement();
+    
+    // Return the applyMovement function for external use
+    return { applyMovement };
 }
 
 // Update fish positions based on server data
@@ -431,13 +810,30 @@ function updateFishPositions(fishData) {
             if (fishEntities.has(fishIdInt)) {
                 const fishEntity = fishEntities.get(fishIdInt);
                 
-                // Update the mesh position
-                fishEntity.mesh.position.x = serverFish.position.x;
-                fishEntity.mesh.position.y = serverFish.position.y;
-                fishEntity.mesh.position.z = serverFish.position.z;
+                // Don't directly update mesh position - store the server position in the data
+                // This allows our interpolation to work without sudden jumps
+                fishEntity.data.serverPosition = {
+                    x: serverFish.position.x,
+                    y: serverFish.position.y,
+                    z: serverFish.position.z
+                };
                 
-                // Update the stored data including chunk information
-                fishEntity.data.position = serverFish.position;
+                // Only if the fish is very far from its server position, teleport it
+                const distanceToServer = Math.sqrt(
+                    Math.pow(fishEntity.mesh.position.x - serverFish.position.x, 2) +
+                    Math.pow(fishEntity.mesh.position.y - serverFish.position.y, 2) +
+                    Math.pow(fishEntity.mesh.position.z - serverFish.position.z, 2)
+                );
+                
+                // If fish is very far from its expected position (>5 units), teleport it
+                if (distanceToServer > 5) {
+                    fishEntity.mesh.position.x = serverFish.position.x;
+                    fishEntity.mesh.position.y = serverFish.position.y;
+                    fishEntity.mesh.position.z = serverFish.position.z;
+                    fishEntity.data.position = { ...serverFish.position };
+                }
+                
+                // Update the stored velocity data - our smoothing will handle the interpolation
                 fishEntity.data.velocity = serverFish.velocity;
                 
                 // Check if fish has moved to a new chunk
@@ -504,6 +900,12 @@ function updateFishPositions(fishData) {
         }
     }
     
+    // Update the fish count in the UI
+    const fishCountElement = document.getElementById('fishCount');
+    if (fishCountElement) {
+        fishCountElement.textContent = fishEntities.size;
+    }
+    
     // Debug logging to check fish entities
     if (Math.random() < 0.01) { // Only log occasionally to avoid console spam
         console.log(`Current fish count: ${fishEntities.size}`);
@@ -539,9 +941,22 @@ function createFishEntity(fishData) {
         return;
     }
     
-    // Create a red sphere for the fish
-    const fishGeometry = new THREE.SphereGeometry(0.3, 8, 8);
-    const fishMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 }); // Red color
+    // Create a larger, brightly colored fish for better visibility
+    const fishGeometry = new THREE.SphereGeometry(1.0, 8, 8); // Increased size from 0.3 to 1.0
+    
+    // Create random bright color for fish
+    const fishColor = new THREE.Color(
+        0.5 + Math.random() * 0.5, // Red component (0.5-1.0)
+        0.5 + Math.random() * 0.5, // Green component (0.5-1.0)
+        0.5 + Math.random() * 0.5  // Blue component (0.5-1.0)
+    );
+    
+    const fishMaterial = new THREE.MeshStandardMaterial({ 
+        color: fishColor,
+        emissive: fishColor.clone().multiplyScalar(0.3), // Add some glow
+        emissiveIntensity: 0.5
+    });
+    
     const fishMesh = new THREE.Mesh(fishGeometry, fishMaterial);
     
     // Set fish position based on server data
@@ -570,6 +985,12 @@ function createFishEntity(fishData) {
         mesh: fishMesh,
         chunkKey: chunkKey
     });
+    
+    // Update the fish count in the UI
+    const fishCountElement = document.getElementById('fishCount');
+    if (fishCountElement) {
+        fishCountElement.textContent = fishEntities.size;
+    }
     
     console.log(`Created fish with ID ${fishData.id} at position:`, fishData.position, 
                 `in chunk (${fishDataComplete.chunkX}, ${fishDataComplete.chunkZ})`);
@@ -684,105 +1105,84 @@ function updatePlayerPositions(players) {
     }
 }
 
-// Wait for both the DOM and libraries to be ready
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('DOM content loaded, setting up game');
+// Initialize game when page loads
+document.addEventListener('DOMContentLoaded', function() {
+    console.log("DOM fully loaded");
+    const startButton = document.getElementById('startButton');
+    const loadingScreen = document.getElementById('loadingScreen');
+    const gameUI = document.getElementById('gameUI');
+    const debugInfo = document.getElementById('debugInfo');
     
-    // Make sure THREE and CANNON are globally available
-    if (typeof THREE === 'undefined' || typeof CANNON === 'undefined') {
-        console.error('Libraries not loaded yet. Wait for them to load.');
-        document.getElementById('errorMessage').textContent = 
-            typeof THREE === 'undefined' ? 'Waiting for Three.js to load...' : 'Waiting for Cannon.js to load...';
-            
-        // Check again after a short delay
-        const checkLibraries = setInterval(() => {
-            if (typeof THREE !== 'undefined' && typeof CANNON !== 'undefined') {
-                console.log('Libraries now available!');
-                clearInterval(checkLibraries);
-                setupGame();
-            }
-        }, 500);
-    } else {
-        // Libraries already available
-        setupGame();
+    if (!startButton) {
+        console.error("Start button not found in DOM");
+        return;
     }
-});
-
-// Setup game after libraries are loaded
-function setupGame() {
-    // Connect to the server
-    connectToServer();
     
-    // Add status indicator
-    const statusIndicator = document.createElement('div');
-    statusIndicator.style.position = 'absolute';
-    statusIndicator.style.bottom = '10px';
-    statusIndicator.style.left = '10px';
-    statusIndicator.style.padding = '5px 10px';
-    statusIndicator.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    statusIndicator.style.color = 'white';
-    statusIndicator.style.fontFamily = 'Arial, sans-serif';
-    statusIndicator.style.fontSize = '12px';
-    statusIndicator.style.borderRadius = '3px';
-    statusIndicator.style.zIndex = '1000';
-    statusIndicator.textContent = 'Connecting...';
-    document.body.appendChild(statusIndicator);
+    console.log("Setting up start button");
     
-    // Update status indicator when connection status changes
-    socket.addEventListener('open', () => {
-        statusIndicator.textContent = 'Connected';
-        statusIndicator.style.backgroundColor = 'rgba(0, 128, 0, 0.5)';
+    // Show the start button once libraries are loaded
+    setTimeout(() => {
+        console.log("Showing start button");
+        startButton.style.display = 'block';
+    }, 1000);
+    
+    startButton.addEventListener('click', function() {
+        console.log("Start button clicked");
         
-        // Auto-initialize game without waiting for button click
-        if (initializeGame()) {
-            console.log("Game initialized successfully");
-            // Hide the start button as we're auto-starting
-            const startButton = document.getElementById('startButton');
-            if (startButton) {
-                startButton.style.display = 'none';
+        try {
+            // Initialize game on button click
+            const initSuccess = initializeGame();
+            console.log("Game initialization result:", initSuccess);
+            
+            if (initSuccess) {
+                // Connect to server
+                connectToServer();
+                
+                // Hide loading screen
+                loadingScreen.style.display = 'none';
+                
+                // Show game UI and debug info
+                gameUI.style.display = 'block';
+                debugInfo.style.display = 'block';
+                
+                // Play ambient underwater sound once user has interacted
+                console.log("Sound manager state:", soundManager ? "exists" : "undefined");
+                
+                // Wait a bit to ensure sounds have loaded
+                setTimeout(() => {
+                    if (soundManager && soundManager.initialized) {
+                        try {
+                            console.log('Starting ambient sound via sound manager...');
+                            soundManager.play('ambient');
+                            
+                            // Occasionally play whale sounds for atmosphere
+                            setInterval(() => {
+                                if (Math.random() < 0.1) { // 10% chance every 30 seconds
+                                    soundManager.play('whale');
+                                }
+                            }, 30000);
+                            
+                            // Occasionally play bubble sounds
+                            setInterval(() => {
+                                if (Math.random() < 0.2) { // 20% chance every 15 seconds
+                                    soundManager.play('bubbles');
+                                }
+                            }, 15000);
+                        } catch (error) {
+                            console.error('Error playing ambient sound:', error);
+                        }
+                    } else {
+                        console.warn('Sound manager not ready:', soundManager);
+                    }
+                }, 2000);
+            } else {
+                console.error("Game initialization failed");
             }
-        } else {
-            console.error("Game initialization failed");
-            document.getElementById('startButton').style.display = 'block';
-            document.getElementById('startButton').addEventListener('click', () => {
-                if (initializeGame()) {
-                    // If game initialized successfully, hide the button
-                    document.getElementById('startButton').style.display = 'none';
-                }
-            });
+        } catch (error) {
+            console.error("Error during game start:", error);
         }
     });
-    
-    socket.addEventListener('close', () => {
-        statusIndicator.textContent = 'Disconnected';
-        statusIndicator.style.backgroundColor = 'rgba(255, 0, 0, 0.5)';
-    });
-    
-    // Add test button to send messages
-    const testButton = document.createElement('button');
-    testButton.textContent = 'Send Test Message';
-    testButton.style.position = 'absolute';
-    testButton.style.bottom = '10px';
-    testButton.style.right = '10px';
-    testButton.style.padding = '5px 10px';
-    testButton.style.backgroundColor = '#0088ff';
-    testButton.style.color = 'white';
-    testButton.style.border = 'none';
-    testButton.style.borderRadius = '3px';
-    testButton.style.fontFamily = 'Arial, sans-serif';
-    testButton.style.fontSize = '12px';
-    testButton.style.cursor = 'pointer';
-    testButton.style.zIndex = '1000';
-    
-    testButton.addEventListener('click', () => {
-        sendMessage({
-            type: 'message',
-            content: 'Test button clicked!'
-        });
-    });
-    
-    document.body.appendChild(testButton);
-}
+});
 
 // Perlin noise implementation (simplified for this context)
 // This is a basic implementation that provides a deterministic noise function
@@ -905,4 +1305,165 @@ function cleanupOutOfRangeFish() {
     }
     
     console.log(`After cleanup: ${fishEntities.size} fish remain in ${fishChunkGroups.size} chunk groups`);
+}
+
+// Apply keyboard movement directly
+function applyKeyboardMovement() {
+    // Check if player physics body is initialized
+    if (!playerBody) {
+        console.warn("Player body not initialized, can't apply movement");
+        return;
+    }
+    
+    const movementSpeed = 10;
+    
+    // Reset velocity to reduce drift
+    playerBody.velocity.x = 0;
+    playerBody.velocity.z = 0;
+    
+    let isMoving = false;
+    
+    // Apply movement based on arrow keys
+    if (keyState.ArrowUp) {
+        // Move forward
+        const forwardVector = new THREE.Vector3(0, 0, -1);
+        forwardVector.applyQuaternion(playerBody.quaternion);
+        playerBody.velocity.x += forwardVector.x * movementSpeed;
+        playerBody.velocity.z += forwardVector.z * movementSpeed;
+        isMoving = true;
+    }
+    
+    if (keyState.ArrowDown) {
+        // Move backward
+        const backwardVector = new THREE.Vector3(0, 0, 1);
+        backwardVector.applyQuaternion(playerBody.quaternion);
+        playerBody.velocity.x += backwardVector.x * movementSpeed;
+        playerBody.velocity.z += backwardVector.z * movementSpeed;
+        isMoving = true;
+    }
+    
+    if (keyState.ArrowLeft) {
+        // Rotate left
+        playerBody.angularVelocity.y = 2;
+        isMoving = true;
+    } else if (keyState.ArrowRight) {
+        // Rotate right
+        playerBody.angularVelocity.y = -2;
+        isMoving = true;
+    } else {
+        // Stop rotation
+        playerBody.angularVelocity.y = 0;
+    }
+    
+    // Play movement sound effects
+    if (isMoving && soundManager && soundManager.initialized) {
+        // Play bubble sounds occasionally when moving
+        if (Math.random() < 0.01) { // 1% chance per frame when moving
+            soundManager.play('bubbles');
+        }
+    }
+}
+
+// Function to update fish positions locally between server updates
+function updateLocalFishPositions(deltaTime) {
+    if (fishEntities.size === 0) return;
+    
+    // Calculate time since last server update (in seconds)
+    const now = performance.now();
+    const timeSinceLastUpdate = (now - lastFishUpdateTime) / 1000;
+    
+    // Lower multiplier for smoother, more subtle movement
+    const movementMultiplier = 0.2;
+    // Position interpolation factor - higher = faster catch-up to server position
+    const positionLerpFactor = 0.05 * deltaTime;
+    
+    // Update each fish's position based on its velocity
+    for (const [fishId, fishEntity] of fishEntities.entries()) {
+        if (!fishEntity.data || !fishEntity.mesh) continue;
+        
+        // If this is a new fish without smooth velocity, initialize it
+        if (!fishEntity.smoothVelocity) {
+            fishEntity.smoothVelocity = {
+                x: fishEntity.data.velocity.x || 0,
+                y: fishEntity.data.velocity.y || 0,
+                z: fishEntity.data.velocity.z || 0
+            };
+        }
+        
+        // If we have a server position, gradually move toward it (position correction)
+        if (fishEntity.data.serverPosition) {
+            // Gradually move toward server position
+            fishEntity.mesh.position.x += (fishEntity.data.serverPosition.x - fishEntity.mesh.position.x) * positionLerpFactor;
+            fishEntity.mesh.position.y += (fishEntity.data.serverPosition.y - fishEntity.mesh.position.y) * positionLerpFactor;
+            fishEntity.mesh.position.z += (fishEntity.data.serverPosition.z - fishEntity.mesh.position.z) * positionLerpFactor;
+        }
+        
+        // Smoothly interpolate velocity rather than using the raw server value
+        const velocityLerpFactor = deltaTime * 1.5;
+        fishEntity.smoothVelocity.x = fishEntity.smoothVelocity.x + (fishEntity.data.velocity.x - fishEntity.smoothVelocity.x) * velocityLerpFactor;
+        fishEntity.smoothVelocity.y = fishEntity.smoothVelocity.y + (fishEntity.data.velocity.y - fishEntity.smoothVelocity.y) * velocityLerpFactor;
+        fishEntity.smoothVelocity.z = fishEntity.smoothVelocity.z + (fishEntity.data.velocity.z - fishEntity.smoothVelocity.z) * velocityLerpFactor;
+        
+        // Apply smoothed velocity to position
+        fishEntity.mesh.position.x += fishEntity.smoothVelocity.x * deltaTime * movementMultiplier;
+        fishEntity.mesh.position.y += fishEntity.smoothVelocity.y * deltaTime * movementMultiplier;
+        fishEntity.mesh.position.z += fishEntity.smoothVelocity.z * deltaTime * movementMultiplier;
+        
+        // Update the stored position data
+        fishEntity.data.position.x = fishEntity.mesh.position.x;
+        fishEntity.data.position.y = fishEntity.mesh.position.y;
+        fishEntity.data.position.z = fishEntity.mesh.position.z;
+        
+        // Check if fish is trying to leave its chunk boundaries - bounce it back if it is
+        const chunkMinX = fishEntity.data.chunkX * CHUNK_SIZE + 2;
+        const chunkMaxX = (fishEntity.data.chunkX + 1) * CHUNK_SIZE - 2;
+        const chunkMinZ = fishEntity.data.chunkZ * CHUNK_SIZE + 2;
+        const chunkMaxZ = (fishEntity.data.chunkZ + 1) * CHUNK_SIZE - 2;
+        const minY = -4.5;
+        const maxY = -1;
+        
+        // Handle boundary collisions more gently to prevent jittery behavior
+        if (fishEntity.mesh.position.x < chunkMinX) {
+            fishEntity.smoothVelocity.x = Math.abs(fishEntity.smoothVelocity.x) * 0.8;
+            fishEntity.data.velocity.x = Math.abs(fishEntity.data.velocity.x);
+            fishEntity.mesh.position.x = chunkMinX + 0.1;
+        } else if (fishEntity.mesh.position.x > chunkMaxX) {
+            fishEntity.smoothVelocity.x = -Math.abs(fishEntity.smoothVelocity.x) * 0.8;
+            fishEntity.data.velocity.x = -Math.abs(fishEntity.data.velocity.x);
+            fishEntity.mesh.position.x = chunkMaxX - 0.1;
+        }
+        
+        if (fishEntity.mesh.position.z < chunkMinZ) {
+            fishEntity.smoothVelocity.z = Math.abs(fishEntity.smoothVelocity.z) * 0.8;
+            fishEntity.data.velocity.z = Math.abs(fishEntity.data.velocity.z);
+            fishEntity.mesh.position.z = chunkMinZ + 0.1;
+        } else if (fishEntity.mesh.position.z > chunkMaxZ) {
+            fishEntity.smoothVelocity.z = -Math.abs(fishEntity.smoothVelocity.z) * 0.8;
+            fishEntity.data.velocity.z = -Math.abs(fishEntity.data.velocity.z);
+            fishEntity.mesh.position.z = chunkMaxZ - 0.1;
+        }
+        
+        if (fishEntity.mesh.position.y < minY) {
+            fishEntity.smoothVelocity.y = Math.abs(fishEntity.smoothVelocity.y) * 0.8;
+            fishEntity.data.velocity.y = Math.abs(fishEntity.data.velocity.y);
+            fishEntity.mesh.position.y = minY + 0.1;
+        } else if (fishEntity.mesh.position.y > maxY) {
+            fishEntity.smoothVelocity.y = -Math.abs(fishEntity.smoothVelocity.y) * 0.8;
+            fishEntity.data.velocity.y = -Math.abs(fishEntity.data.velocity.y);
+            fishEntity.mesh.position.y = maxY - 0.1;
+        }
+        
+        // Reduce the frequency of random direction changes
+        if (Math.random() < 0.0001) {
+            // Create more gradual direction changes
+            const targetVx = (Math.random() * 2 - 1) * 1.5;
+            const targetVy = (Math.random() * 2 - 1) * 0.3;
+            const targetVz = (Math.random() * 2 - 1) * 1.5;
+            
+            // Store the new target velocity but let smooth interpolation handle the transition
+            fishEntity.data.velocity.x = targetVx;
+            fishEntity.data.velocity.y = targetVy;
+            fishEntity.data.velocity.z = targetVz;
+        }
+    }
 } 

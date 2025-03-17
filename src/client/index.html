@@ -51,6 +51,55 @@
             text-align: center;
             max-width: 80%;
         }
+        #gameUI {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+            z-index: 100;
+        }
+        #environmentInfo {
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        #compass {
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 8px 12px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+        #compassIndicator {
+            width: 30px;
+            height: 30px;
+            margin-left: 10px;
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white"><path d="M12 2L8 11h8L12 2zm0 20l4-9H8l4 9z"/></svg>');
+            background-repeat: no-repeat;
+            background-position: center;
+            transform-origin: center;
+        }
+        .audioMessage {
+            margin-top: 10px;
+            font-size: 16px;
+            color: #aaccff;
+        }
+        #debugInfo {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+            font-size: 12px;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 8px;
+            border-radius: 5px;
+            z-index: 100;
+        }
     </style>
     <!-- Load Three.js from cdnjs -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.149.0/three.min.js"></script>
@@ -62,8 +111,23 @@
         <div>Loading Underwater Odyssey...</div>
         <button id="startButton" style="display:none;">Start Game</button>
         <div id="errorMessage"></div>
+        <div class="audioMessage">
+            Click "Start Game" to enable underwater sounds and ambient effects.
+        </div>
     </div>
     <canvas id="gameCanvas"></canvas>
+    <div id="gameUI" style="display:none;">
+        <div id="environmentInfo">Depth: 0m | Biome: Coral Reef</div>
+        <div id="compass">
+            Direction: <span id="directionText">North</span>
+            <div id="compassIndicator"></div>
+        </div>
+    </div>
+    <div id="debugInfo" style="display:none;">
+        Connection: <span id="connectionStatus">Disconnected</span><br>
+        Client ID: <span id="clientId">None</span><br>
+        Fish Count: <span id="fishCount">0</span>
+    </div>
     <script>
         // Check if libraries loaded properly
         window.addEventListener('DOMContentLoaded', function() {
@@ -78,6 +142,6 @@
             }
         });
     </script>
-    <script src="main.js"></script>
+    <script type="module" src="main.js"></script>
 </body>
 </html> 

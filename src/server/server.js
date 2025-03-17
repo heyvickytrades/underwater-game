@@ -43,20 +43,39 @@ wss.on('connection', (ws) => {
     const clientId = nextClientId++;
     clients.set(ws, clientId);
     
-    // Initialize player position at origin
+    // Set player's initial position and chunk
     playerPositions.set(clientId, { x: 0, y: 0, z: 0 });
     playerVelocities.set(clientId, { x: 0, y: 0, z: 0 });
     playerChunks.set(clientId, { x: 0, z: 0 });
-    playerKeys.set(clientId, { 
-        ArrowUp: false, 
-        ArrowDown: false, 
-        ArrowLeft: false, 
-        ArrowRight: false 
+    playerKeys.set(clientId, {
+        ArrowUp: false,
+        ArrowDown: false,
+        ArrowLeft: false,
+        ArrowRight: false
     });
     
     console.log(`Client ${clientId} connected`);
-
-    // Handle WebSocket messages
+    
+    // Spawn initial fish in the area around the starting position (5x5 grid)
+    const startingChunkX = 0;
+    const startingChunkZ = 0;
+    
+    // Check if we need to load new chunks (and spawn fish) for starting area
+    for (let dx = -2; dx <= 2; dx++) {
+        for (let dz = -2; dz <= 2; dz++) {
+            const newChunkX = startingChunkX + dx;
+            const newChunkZ = startingChunkZ + dz;
+            const chunkKey = `${newChunkX},${newChunkZ}`;
+            
+            // If this chunk is not already loaded, spawn fish for it
+            if (!loadedChunks.has(chunkKey)) {
+                loadedChunks.add(chunkKey);
+                spawnFishForChunk(newChunkX, newChunkZ);
+            }
+        }
+    }
+    
+    // Handle messages from the client
     ws.on('message', (message) => {
         try {
             const parsedMessage = JSON.parse(message);
@@ -151,8 +170,11 @@ wss.on('connection', (ws) => {
 function spawnFishForChunk(chunkX, chunkZ) {
     console.log(`Spawning fish for chunk ${chunkX},${chunkZ}`);
     
-    // Spawn FISH_PER_CHUNK fish in random positions within the chunk
-    for (let i = 0; i < FISH_PER_CHUNK; i++) {
+    // Increase the number of fish per chunk for better visibility
+    const fishPerChunk = 15; // Increased from 5 to 15
+    
+    // Spawn fishPerChunk fish in random positions within the chunk
+    for (let i = 0; i < fishPerChunk; i++) {
         const fishId = nextFishId++;
         
         // Random position within the chunk
@@ -160,13 +182,18 @@ function spawnFishForChunk(chunkX, chunkZ) {
         const y = -3 + Math.random() * 2; // Random height between -3 and -1
         const z = chunkZ * CHUNK_SIZE + Math.random() * CHUNK_SIZE;
         
+        // Generate random initial velocity
+        const vx = (Math.random() * 2 - 1) * 2; // Random velocity between -2 and 2
+        const vy = (Math.random() * 2 - 1) * 0.5; // Smaller vertical movement
+        const vz = (Math.random() * 2 - 1) * 2; // Random velocity between -2 and 2
+        
         // Create fish entity
         const fish = {
             id: fishId,
             chunkX: chunkX,
             chunkZ: chunkZ,
             position: { x, y, z },
-            velocity: { x: 0, y: 0, z: 0 },
+            velocity: { x: vx, y: vy, z: vz },
             lastDirectionChange: Date.now()
         };
         
