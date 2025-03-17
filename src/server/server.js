@@ -170,8 +170,8 @@ wss.on('connection', (ws) => {
 function spawnFishForChunk(chunkX, chunkZ) {
     console.log(`Spawning fish for chunk ${chunkX},${chunkZ}`);
     
-    // Increase the number of fish per chunk for better visibility
-    const fishPerChunk = 15; // Increased from 5 to 15
+    // Reduce the number of fish per chunk to 10% of previous amount
+    const fishPerChunk = 1; // Reduced from 15 to 1 (about 10% of original)
     
     // Spawn fishPerChunk fish in random positions within the chunk
     for (let i = 0; i < fishPerChunk; i++) {

@@ -176,9 +176,9 @@ function initPlanktonParticles() {
         // Create particle geometry
         const particleGeometry = new THREE.BufferGeometry();
         
-        // Number of particles
-        const particleCount = 3000; // Increased from 2000 for better coverage
-        const range = 60; // Increased from 50 for wider spread
+        // Number of particles - reduced by 50%
+        const particleCount = 1500; // Reduced from 3000 to 1500
+        const range = 60; // Keep the same range
         
         // Create positions array
         const positions = new Float32Array(particleCount * 3);
@@ -190,8 +190,8 @@ function initPlanktonParticles() {
             positions[i * 3 + 1] = (Math.random() - 0.5) * (range / 2) - 2; // More concentrated vertically, slightly below center
             positions[i * 3 + 2] = (Math.random() - 0.5) * range;
             
-            // Random size variation
-            sizes[i] = Math.random() * 0.5 + 0.1;
+            // Random size variation - reduced
+            sizes[i] = Math.random() * 0.3 + 0.05; // Smaller size range
         }
         
         // Add attributes to the geometry
@@ -201,9 +201,9 @@ function initPlanktonParticles() {
         // Create particle material
         const particleMaterial = new THREE.PointsMaterial({
             color: 0xffffff,
-            size: 0.2, // Slightly larger from 0.1 for better visibility
+            size: 0.1, // Reduced from 0.2 to 0.1
             transparent: true,
-            opacity: 0.4, // Slightly more opaque from 0.3 for better visibility
+            opacity: 0.3, // Reduced from 0.4 to 0.3
             blending: THREE.AdditiveBlending,
             depthWrite: false
         });
@@ -244,6 +244,23 @@ function initUnderwaterFog() {
 // Initialize sound manager
 function initSoundManager() {
     try {
+        console.log("Sound loading disabled to reduce system load");
+        
+        // Create a dummy sound manager that doesn't actually load or play sounds
+        soundManager = {
+            initialized: false,  // Keep as false to prevent sound playback attempts
+            sounds: {},
+            play: function(name) {
+                // No-op function that logs but doesn't play sounds
+                console.log(`Sound playback disabled: ${name}`);
+            },
+            stop: function(name) {
+                // No-op function
+                console.log(`Sound stop disabled: ${name}`);
+            }
+        };
+        
+        /* SOUND LOADING DISABLED
         console.log("Initializing sound manager...");
         
         // Create an audio listener and add it to the camera
@@ -337,6 +354,7 @@ function initSoundManager() {
                 console.error('Error loading whale sound:', error);
             }
         );
+        END OF SOUND LOADING DISABLED */
         
     } catch (error) {
         console.error('Error initializing sound manager:', error);
@@ -941,20 +959,16 @@ function createFishEntity(fishData) {
         return;
     }
     
-    // Create a larger, brightly colored fish for better visibility
-    const fishGeometry = new THREE.SphereGeometry(1.0, 8, 8); // Increased size from 0.3 to 1.0
+    // Create a smaller fish as requested
+    const fishGeometry = new THREE.SphereGeometry(0.3, 8, 8); // Reduced size from 1.0 to 0.3
     
-    // Create random bright color for fish
-    const fishColor = new THREE.Color(
-        0.5 + Math.random() * 0.5, // Red component (0.5-1.0)
-        0.5 + Math.random() * 0.5, // Green component (0.5-1.0)
-        0.5 + Math.random() * 0.5  // Blue component (0.5-1.0)
-    );
+    // Create red color for fish to make them more visible
+    const fishColor = new THREE.Color(0xff0000); // Bright red color
     
     const fishMaterial = new THREE.MeshStandardMaterial({ 
         color: fishColor,
-        emissive: fishColor.clone().multiplyScalar(0.3), // Add some glow
-        emissiveIntensity: 0.5
+        emissive: fishColor.clone().multiplyScalar(0.4), // Add some glow
+        emissiveIntensity: 0.7 // Increase emissive intensity for better visibility
     });
     
     const fishMesh = new THREE.Mesh(fishGeometry, fishMaterial);
@@ -1145,6 +1159,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 gameUI.style.display = 'block';
                 debugInfo.style.display = 'block';
                 
+                // Sound playback disabled
+                console.log("Sound playback disabled to reduce system load");
+                
+                /* SOUND PLAYBACK DISABLED
                 // Play ambient underwater sound once user has interacted
                 console.log("Sound manager state:", soundManager ? "exists" : "undefined");
                 
@@ -1175,6 +1193,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         console.warn('Sound manager not ready:', soundManager);
                     }
                 }, 2000);
+                END OF SOUND PLAYBACK DISABLED */
             } else {
                 console.error("Game initialization failed");
             }
@@ -1355,6 +1374,8 @@ function applyKeyboardMovement() {
         playerBody.angularVelocity.y = 0;
     }
     
+    // Sound playback during movement disabled
+    /* SOUND PLAYBACK DISABLED
     // Play movement sound effects
     if (isMoving && soundManager && soundManager.initialized) {
         // Play bubble sounds occasionally when moving
@@ -1362,6 +1383,7 @@ function applyKeyboardMovement() {
             soundManager.play('bubbles');
         }
     }
+    END OF SOUND PLAYBACK DISABLED */
 }
 
 // Function to update fish positions locally between server updates
